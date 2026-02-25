@@ -1,58 +1,94 @@
-import json
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
 import requests
-from fastapi import FastAPI
-from pathlib import Path
+import os
+import uvicorn
 
 app = FastAPI()
-session = requests.Session()
-token = None
 
-def load_options():
-    options_path = Path("/data/options.json")
-    data = json.loads(options_path.read_text())
-    return data["cozi_email"], data["cozi_password"]
+COZI_EMAIL = os.getenv("COZI_EMAIL")
+COZI_PASSWORD = os.getenv("COZI_PASSWORD")
 
-def login():
-    global token
-    email, password = load_options()
-    r = session.post(
-        "https://api.cozi.com/api/v3/login",
-        json={"email": email, "password": password}
-    )
-    r.raise_for_status()
-    token = r.json()["token"]
-    session.headers.update({"Authorization": f"Bearer {token}"})
+BASE_URL = "https://api.cozi.com/api/v1"
 
-@app.on_event("startup")
-def startup():
-    login()
+
+def cozi_login():
+    """Authenticate with Cozi and return a session token."""
+    payload = {
+        "email": COZI_EMAIL,
+        "password": COZI_PASSWORD
+    }
+
+    r = requests.post(f"{BASE_URL}/login", json=payload)
+    if r.status_code != 200:
+        raise HTTPException(status_code=401, detail="Invalid Cozi credentials")
+
+    return r.json().get("token")
+
+
+def cozi_headers():
+    """Return headers including auth token."""
+    token = cozi_login()
+    return {"Authorization": f"Bearer {token}"}
+
 
 @app.get("/lists")
 def get_lists():
-    r = session.get("https://api.cozi.com/api/v3/lists")
-    r.raise_for_status()
+    """Return all Cozi to-do lists."""
+    r = requests.get(f"{BASE_URL}/lists", headers=cozi_headers())
+    if r.status_code != 200:
+        raise HTTPException(status_code=500, detail="Failed to fetch lists")
     return r.json()
+
 
 @app.get("/list/{list_id}")
-def get_list(list_id: str):
-    r = session.get(f"https://api.cozi.com/api/v3/lists/{list_id}")
-    r.raise_for_status()
+def get_list_items(list_id: str):
+    """Return items for a specific list."""
+    r = requests.get(f"{BASE_URL}/lists/{list_id}", headers=cozi_headers())
+    if r.status_code != 200:
+        raise HTTPException(status_code=500, detail="Failed to fetch list items")
     return r.json()
+
+
+class AddItem(BaseModel):
+    item: str
+
 
 @app.post("/list/{list_id}/add")
-def add_item(list_id: str, item: dict):
-    r = session.post(
-        f"https://api.cozi.com/api/v3/lists/{list_id}/items",
-        json={"text": item["item"]}
+def add_item(list_id: str, data: AddItem):
+    """Add an item to a list."""
+    payload = {"text": data.item}
+
+    r = requests.post(
+        f"{BASE_URL}/lists/{list_id}/items",
+        json=payload,
+        headers=cozi_headers()
     )
-    r.raise_for_status()
-    return r.json()
+
+    if r.status_code != 200:
+        raise HTTPException(status_code=500, detail="Failed to add item")
+
+    return {"status": "ok"}
+
+
+class RemoveItem(BaseModel):
+    item_id: str
+
 
 @app.post("/list/{list_id}/remove")
-def remove_item(list_id: str, item: dict):
-    item_id = item["item_id"]
-    r = session.delete(
-        f"https://api.cozi.com/api/v3/lists/{list_id}/items/{item_id}"
+def remove_item(list_id: str, data: RemoveItem):
+    """Remove an item from a list."""
+    r = requests.delete(
+        f"{BASE_URL}/lists/{list_id}/items/{data.item_id}",
+        headers=cozi_headers()
     )
-    r.raise_for_status()
+
+    if r.status_code != 200:
+        raise HTTPException(status_code=500, detail="Failed to remove item")
+
     return {"status": "ok"}
+
+
+# ⭐ THIS IS THE PART YOU WERE MISSING ⭐
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=5000)
