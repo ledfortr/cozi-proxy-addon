@@ -1,5 +1,5 @@
 name: "Cozi Proxy API"
-version: "1.3.8"
+version: "1.3.9"
 slug: "cozi_proxy2"
 description: "Local API bridge for Cozi To-Do lists"
 arch:
@@ -9,17 +9,18 @@ startup: services
 boot: auto
 host_network: true
 
+# User-configurable options (shown in Supervisor UI)
 options:
-  cozi_email: ""
-  cozi_password: ""
+  username: ""
+  password: ""
 
+# Schema for the add-on configuration UI
 schema:
-  cozi_email: str
-  cozi_password: str
+  username: str
+  password: str
 
-environment:
-  COZI_EMAIL: "{cozi_email}"
-  COZI_PASSWORD: "{cozi_password}"
+# No need for environment variables anymore
+environment: {}
 
 ports:
   5000/tcp: 5000
