@@ -1,5 +1,5 @@
 name: "Cozi Proxy API"
-version: "1.0.0"
+version: "1.0.1"
 slug: "cozi_proxy"
 description: "Local API bridge for Cozi To-Do lists"
 arch:
