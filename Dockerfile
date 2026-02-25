@@ -1,13 +1,13 @@
-# force rebuild 001
 FROM python:3.11-slim
 
-WORKDIR /app
+WORKDIR /cozi_proxy
 
-COPY requirements.txt .
+COPY cozi_proxy/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY . .
+COPY cozi_proxy/server.py .
 
-CMD ["python3", "/app/server.py"]
+CMD ["uvicorn", "server:app", "--host", "0.0.0.0", "--port", "5000"]
+
 
 
