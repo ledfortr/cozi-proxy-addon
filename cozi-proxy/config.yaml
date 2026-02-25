@@ -1,0 +1,16 @@
+name: "Cozi Proxy API"
+version: "1.0.0"
+slug: "cozi_proxy"
+description: "Local API bridge for Cozi To-Do lists"
+arch:
+  - amd64
+startup: services
+boot: auto
+ports:
+  5000/tcp: 5000
+options:
+  cozi_email: ""
+  cozi_password: ""
+schema:
+  cozi_email: str
+  cozi_password: str
