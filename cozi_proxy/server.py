@@ -1,223 +1,117 @@
-import os
-import asyncio
-import httpx
-from typing import List, Optional
-
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
+from cozi import Cozi
+from cozi.exceptions import InvalidLoginException, CoziException
 
-app = FastAPI(title="Cozi Proxy API")
+app = FastAPI()
 
-# ---------------------------------------------------------
-# CONFIG
-# ---------------------------------------------------------
+class LoginRequest(BaseModel):
+    username: str
+    password: str
 
-COZI_EMAIL = os.getenv("COZI_EMAIL")
-COZI_PASSWORD = os.getenv("COZI_PASSWORD")
-
-if not COZI_EMAIL or not COZI_PASSWORD:
-    raise RuntimeError("Cozi credentials not set in environment variables.")
-
-BASE_URL = "https://www.cozi.com/api/v1"
-
-# Global session
-client: Optional[httpx.AsyncClient] = None
-auth_token: Optional[str] = None
-
-
-# ---------------------------------------------------------
-# LOGIN
-# ---------------------------------------------------------
-
-async def cozi_login():
-    """Log in to Cozi mobile API and store the auth token."""
-    global client, auth_token
-
-    if client is None:
-        client = httpx.AsyncClient(timeout=20)
-
-    payload = {
-        "email": COZI_EMAIL,
-        "password": COZI_PASSWORD
-    }
-
-    r = await client.post(f"{BASE_URL}/login", json=payload)
-
-    if r.status_code != 200:
-        raise HTTPException(status_code=401, detail="Cozi login failed")
-
-    data = r.json()
-
-    if "token" not in data:
-        raise HTTPException(status_code=500, detail="Cozi login returned no token")
-
-    auth_token = data["token"]
-
-
-def auth_headers():
-    if not auth_token:
-        raise HTTPException(status_code=401, detail="Not logged in to Cozi")
-    return {"Authorization": f"Bearer {auth_token}"}
-
-
-# ---------------------------------------------------------
-# STARTUP
-# ---------------------------------------------------------
-
-@app.on_event("startup")
-async def startup_event():
-    """Login once at startup."""
-    try:
-        await cozi_login()
-        print("Cozi login successful.")
-    except Exception as e:
-        print(f"Startup login failed: {e}")
-
-
-# ---------------------------------------------------------
-# REQUEST MODELS
-# ---------------------------------------------------------
-
-class AddListRequest(BaseModel):
-    list_title: str
-    list_type: str  # "shopping" or "todo"
-
-
-class AddItemRequest(BaseModel):
+class ItemRequest(BaseModel):
+    list_id: str
     item_text: str
     item_pos: int = 0
 
-
 class EditItemRequest(BaseModel):
+    list_id: str
+    item_id: str
     item_text: str
 
-
 class MarkItemRequest(BaseModel):
-    status: str  # "complete" or "incomplete"
-
+    list_id: str
+    item_id: str
+    status: str
 
 class RemoveItemsRequest(BaseModel):
-    item_ids: List[str]
+    list_id: str
+    item_ids: list[str]
 
+class ReorderRequest(BaseModel):
+    list_id: str
+    list_title: str
+    items_list: list
+    list_type: str
 
-# ---------------------------------------------------------
-# LIST ENDPOINTS
-# ---------------------------------------------------------
+cozi_client: Cozi | None = None
+
+@app.post("/login")
+async def login(req: LoginRequest):
+    global cozi_client
+    cozi_client = Cozi(req.username, req.password)
+    try:
+        await cozi_client.login()
+    except InvalidLoginException:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    return {"status": "ok"}
 
 @app.get("/lists")
 async def get_lists():
-    """Return all Cozi lists."""
+    if not cozi_client:
+        raise HTTPException(status_code=400, detail="Not logged in")
     try:
-        await cozi_login()
-        r = await client.get(f"{BASE_URL}/lists", headers=auth_headers())
-        return r.json()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to fetch lists: {e}")
+        lists = await cozi_client.get_lists()
+        return {"lists": lists}
+    except CoziException as ex:
+        raise HTTPException(status_code=500, detail=str(ex))
 
-
-@app.post("/lists")
-async def add_list(body: AddListRequest):
-    """Create a new list."""
+@app.get("/persons")
+async def get_persons():
+    if not cozi_client:
+        raise HTTPException(status_code=400, detail="Not logged in")
     try:
-        await cozi_login()
-        payload = {
-            "title": body.list_title,
-            "type": body.list_type
-        }
-        r = await client.post(f"{BASE_URL}/lists", json=payload, headers=auth_headers())
-        return r.json()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to add list: {e}")
+        persons = await cozi_client.get_persons()
+        return {"persons": persons}
+    except CoziException as ex:
+        raise HTTPException(status_code=500, detail=str(ex))
 
-
-@app.delete("/lists/{list_id}")
-async def remove_list(list_id: str):
-    """Delete a list."""
+@app.post("/add_item")
+async def add_item(req: ItemRequest):
+    if not cozi_client:
+        raise HTTPException(status_code=400, detail="Not logged in")
     try:
-        await cozi_login()
-        r = await client.delete(f"{BASE_URL}/lists/{list_id}", headers=auth_headers())
-        return r.json()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to remove list: {e}")
+        await cozi_client.add_item(req.list_id, req.item_text, req.item_pos)
+        return {"status": "ok"}
+    except CoziException as ex:
+        raise HTTPException(status_code=500, detail=str(ex))
 
-
-@app.get("/lists/{list_id}")
-async def get_list_by_id(list_id: str):
-    """Return a single list including items."""
+@app.post("/edit_item")
+async def edit_item(req: EditItemRequest):
+    if not cozi_client:
+        raise HTTPException(status_code=400, detail="Not logged in")
     try:
-        await cozi_login()
-        r = await client.get(f"{BASE_URL}/lists/{list_id}", headers=auth_headers())
-        return r.json()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to fetch list: {e}")
+        await cozi_client.edit_item(req.list_id, req.item_id, req.item_text)
+        return {"status": "ok"}
+    except CoziException as ex:
+        raise HTTPException(status_code=500, detail=str(ex))
 
-
-# ---------------------------------------------------------
-# ITEM ENDPOINTS
-# ---------------------------------------------------------
-
-@app.post("/lists/{list_id}/items")
-async def add_item(list_id: str, body: AddItemRequest):
-    """Add an item to a list."""
+@app.post("/mark_item")
+async def mark_item(req: MarkItemRequest):
+    if not cozi_client:
+        raise HTTPException(status_code=400, detail="Not logged in")
     try:
-        await cozi_login()
-        payload = {
-            "text": body.item_text,
-            "position": body.item_pos
-        }
-        r = await client.post(
-            f"{BASE_URL}/lists/{list_id}/items",
-            json=payload,
-            headers=auth_headers()
-        )
-        return r.json()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to add item: {e}")
+        await cozi_client.mark_item(req.list_id, req.item_id, req.status)
+        return {"status": "ok"}
+    except CoziException as ex:
+        raise HTTPException(status_code=500, detail=str(ex))
 
-
-@app.post("/lists/{list_id}/items/{item_id}/edit")
-async def edit_item(list_id: str, item_id: str, body: EditItemRequest):
-    """Edit an item."""
+@app.post("/remove_items")
+async def remove_items(req: RemoveItemsRequest):
+    if not cozi_client:
+        raise HTTPException(status_code=400, detail="Not logged in")
     try:
-        await cozi_login()
-        payload = {"text": body.item_text}
-        r = await client.post(
-            f"{BASE_URL}/lists/{list_id}/items/{item_id}/edit",
-            json=payload,
-            headers=auth_headers()
-        )
-        return r.json()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to edit item: {e}")
+        await cozi_client.remove_items(req.list_id, req.item_ids)
+        return {"status": "ok"}
+    except CoziException as ex:
+        raise HTTPException(status_code=500, detail=str(ex))
 
-
-@app.post("/lists/{list_id}/items/{item_id}/mark")
-async def mark_item(list_id: str, item_id: str, body: MarkItemRequest):
-    """Mark item complete/incomplete."""
+@app.post("/reorder_items")
+async def reorder_items(req: ReorderRequest):
+    if not cozi_client:
+        raise HTTPException(status_code=400, detail="Not logged in")
     try:
-        await cozi_login()
-        payload = {"status": body.status}
-        r = await client.post(
-            f"{BASE_URL}/lists/{list_id}/items/{item_id}/mark",
-            json=payload,
-            headers=auth_headers()
-        )
-        return r.json()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to mark item: {e}")
-
-
-@app.post("/lists/{list_id}/items/remove")
-async def remove_items(list_id: str, body: RemoveItemsRequest):
-    """Remove multiple items."""
-    try:
-        await cozi_login()
-        payload = {"itemIds": body.item_ids}
-        r = await client.post(
-            f"{BASE_URL}/lists/{list_id}/items/remove",
-            json=payload,
-            headers=auth_headers()
-        )
-        return r.json()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to remove items: {e}")
+        await cozi_client.reorder_list(req.list_id, req.list_title, req.items_list, req.list_type)
+        return {"status": "ok"}
+    except CoziException as ex:
+        raise HTTPException(status_code=500, detail=str(ex))
