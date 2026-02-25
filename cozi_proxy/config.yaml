@@ -4,13 +4,22 @@ slug: "cozi_proxy"
 description: "Local API bridge for Cozi To-Do lists"
 arch:
   - amd64
+  - aarch64
 startup: services
 boot: auto
-ports:
-  5000/tcp: 5000
+host_network: true
+
 options:
   cozi_email: ""
   cozi_password: ""
+
 schema:
   cozi_email: str
   cozi_password: str
+
+environment:
+  COZI_EMAIL: "{cozi_email}"
+  COZI_PASSWORD: "{cozi_password}"
+
+ports:
+  5000/tcp: 5000
