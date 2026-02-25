@@ -1,6 +1,6 @@
 fastapi
 uvicorn
 requests
-httpx
+py-cozi>=2026.2.1
 
  
