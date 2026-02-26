@@ -5,18 +5,8 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from cozi import Cozi
 from cozi.exceptions import InvalidLoginException, CoziException
-from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI()
-
-# Add CORS middleware to allow cross-origin requests (e.g., from HA iframe or browser)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # Allows all origins (restrict to "http://192.168.1.226:8123" for security)
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 # Global Cozi client instance
 cozi_client: Cozi | None = None
@@ -67,7 +57,6 @@ class AddItemRequest(BaseModel):
     list_id: str
     item_text: str
     item_pos: int
-    item_type: str = None  # Optional for headers
 
 
 class EditItemRequest(BaseModel):
@@ -119,7 +108,7 @@ async def add_item(req: AddItemRequest):
     if not cozi_client:
         raise HTTPException(status_code=400, detail="Not logged in")
     try:
-        await cozi_client.add_item(req.list_id, req.item_text, req.item_pos, item_type=req.item_type)
+        await cozi_client.add_item(req.list_id, req.item_text, req.item_pos)
         return {"status": "ok"}
     except CoziException as ex:
         raise HTTPException(status_code=500, detail=str(ex))
