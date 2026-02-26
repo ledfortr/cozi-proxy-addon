@@ -93,6 +93,15 @@ class ReorderRequest(BaseModel):
     list_type: str
 
 
+class AddListRequest(BaseModel):
+    list_title: str
+    list_type: str = "shopping"
+
+
+class ReorderListsRequest(BaseModel):
+    lists: list
+
+
 @app.get("/lists")
 async def get_lists():
     if not cozi_client:
@@ -159,6 +168,28 @@ async def reorder_items(req: ReorderRequest):
             req.items_list,
             req.list_type
         )
+        return {"status": "ok"}
+    except CoziException as ex:
+        raise HTTPException(status_code=500, detail=str(ex))
+
+
+@app.post("/add_list")
+async def add_list(req: AddListRequest):
+    if not cozi_client:
+        raise HTTPException(status_code=400, detail="Not logged in")
+    try:
+        await cozi_client.add_list(req.list_title, req.list_type)
+        return {"status": "ok"}
+    except CoziException as ex:
+        raise HTTPException(status_code=500, detail=str(ex))
+
+
+@app.post("/reorder_lists")
+async def reorder_lists(req: ReorderListsRequest):
+    if not cozi_client:
+        raise HTTPException(status_code=400, detail="Not logged in")
+    try:
+        await cozi_client.reorder_lists(req.lists)
         return {"status": "ok"}
     except CoziException as ex:
         raise HTTPException(status_code=500, detail=str(ex))
