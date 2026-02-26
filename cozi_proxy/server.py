@@ -5,8 +5,18 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from cozi import Cozi
 from cozi.exceptions import InvalidLoginException, CoziException
+from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI()
+
+# Add CORS middleware to allow requests from HA (or any origin)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Allows all origins (change to specific HA URL for security, e.g., "http://192.168.1.226:8123")
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Global Cozi client instance
 cozi_client: Cozi | None = None
@@ -23,64 +33,58 @@ async def auto_login():
     print(f"Options file exists: {os.path.exists(options_path)}")
 
     if not os.path.exists(options_path):
-        print("No options.json found, skipping auto-login")
+        print("Error: options.json not found!")
         return
 
-    try:
-        with open(options_path, "r") as f:
-            opts = json.load(f)
-    except Exception as ex:
-        print(f"Failed to read options.json: {ex}")
-        return
+    with open(options_path, "r") as options_file:
+        options = json.load(options_file)
+        username = options.get("username")
+        password = options.get("password")
 
-    username = opts.get("username")
-    password = opts.get("password")
+        if not username or not password:
+            print("Error: Username or password not found in options.json!")
+            return
 
-    print(f"Loaded username: {username}")
+        print("Logging in with username:", username)
 
-    if not username or not password:
-        print("Credentials missing in options.json")
-        return
-
-    try:
         cozi_client = Cozi(username, password)
-        await cozi_client.login()
-        print("=== Auto-login successful ===")
-    except Exception as ex:
-        print(f"=== Auto-login failed: {ex} ===")
+
+        try:
+            await cozi_client.login()
+            print("Login successful")
+        except InvalidLoginException:
+            print("Invalid login credentials")
+        except CoziException as ex:
+            print("Error logging in:", str(ex))
 
 
 @app.on_event("startup")
 async def startup_event():
-    print("=== Cozi Proxy: Startup event fired ===")
-    asyncio.create_task(auto_login())
+    await auto_login()
 
 
-# -----------------------------
-# Request Models
-# -----------------------------
-class LoginRequest(BaseModel):
-    username: str
-    password: str
-
-class ItemRequest(BaseModel):
+class AddItemRequest(BaseModel):
     list_id: str
     item_text: str
-    item_pos: int = 0
+    item_pos: int
+
 
 class EditItemRequest(BaseModel):
     list_id: str
     item_id: str
     item_text: str
 
+
 class MarkItemRequest(BaseModel):
     list_id: str
     item_id: str
     status: str
 
+
 class RemoveItemsRequest(BaseModel):
     list_id: str
     item_ids: list[str]
+
 
 class ReorderRequest(BaseModel):
     list_id: str
@@ -89,23 +93,6 @@ class ReorderRequest(BaseModel):
     list_type: str
 
 
-# -----------------------------
-# Manual Login Endpoint
-# -----------------------------
-@app.post("/login")
-async def login(req: LoginRequest):
-    global cozi_client
-    cozi_client = Cozi(req.username, req.password)
-    try:
-        await cozi_client.login()
-    except InvalidLoginException:
-        raise HTTPException(status_code=401, detail="Invalid credentials")
-    return {"status": "ok"}
-
-
-# -----------------------------
-# API Endpoints
-# -----------------------------
 @app.get("/lists")
 async def get_lists():
     if not cozi_client:
@@ -117,19 +104,8 @@ async def get_lists():
         raise HTTPException(status_code=500, detail=str(ex))
 
 
-@app.get("/persons")
-async def get_persons():
-    if not cozi_client:
-        raise HTTPException(status_code=400, detail="Not logged in")
-    try:
-        persons = await cozi_client.get_persons()
-        return {"persons": persons}
-    except CoziException as ex:
-        raise HTTPException(status_code=500, detail=str(ex))
-
-
 @app.post("/add_item")
-async def add_item(req: ItemRequest):
+async def add_item(req: AddItemRequest):
     if not cozi_client:
         raise HTTPException(status_code=400, detail="Not logged in")
     try:
