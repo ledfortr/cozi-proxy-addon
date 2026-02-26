@@ -9,10 +9,10 @@ from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI()
 
-# Add CORS middleware to allow requests from HA (or any origin)
+# Add CORS middleware to allow cross-origin requests (e.g., from HA iframe or browser)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allows all origins (change to specific HA URL for security, e.g., "http://192.168.1.226:8123")
+    allow_origins=["*"],  # Allows all origins (restrict to "http://192.168.1.226:8123" for security)
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
