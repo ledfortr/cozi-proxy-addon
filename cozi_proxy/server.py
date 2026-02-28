@@ -21,12 +21,12 @@ app.add_middleware(
 cozi_client: Cozi | None = None
 logged_in = False
 
-# ====================== IMPROVED AUTO LOGIN ======================
+# ====================== AUTO LOGIN WITH CLEANUP ======================
 async def auto_login():
     global cozi_client, logged_in
-    options_path = "/data/options.json"
     print("=== Cozi Proxy: Auto-login starting ===")
 
+    options_path = "/data/options.json"
     if not os.path.exists(options_path):
         print("❌ options.json not found!")
         return
@@ -40,27 +40,46 @@ async def auto_login():
         print("❌ Username or password missing!")
         return
 
-    print(f"Logging in with username: {username}")
+    print(f"Logging in with: {username}")
+
+    # Clean up any old client
+    if cozi_client:
+        try:
+            await cozi_client._session.close()
+        except:
+            pass
 
     cozi_client = Cozi(username, password)
 
-    for attempt in range(5):  # Try 5 times
+    for attempt in range(5):
         try:
             await cozi_client.login()
             print("✅ Login successful!")
             logged_in = True
             return
         except Exception as e:
-            print(f"❌ Login attempt {attempt+1}/5 failed: {e}")
-            await asyncio.sleep(10)  # Wait longer between attempts
+            print(f"❌ Attempt {attempt+1}/5 failed: {e}")
+            await asyncio.sleep(10)
 
-    print("⚠️ All login attempts failed. Proxy is running - use /relogin to try again later.")
-
+    print("⚠️ All login attempts failed. Use /relogin later.")
 
 @app.on_event("startup")
 async def startup_event():
     await auto_login()
 
+# ====================== MANUAL RELOGIN ======================
+@app.post("/relogin")
+async def relogin():
+    global logged_in
+    if not cozi_client:
+        raise HTTPException(status_code=400, detail="Client not initialized")
+    try:
+        await cozi_client.login()
+        logged_in = True
+        return {"status": "success", "message": "Logged in!"}
+    except Exception as e:
+        logged_in = False
+        raise HTTPException(status_code=500, detail=f"Login failed: {str(e)}")
 
 # ====================== SERVE HTML ======================
 @app.get("/", response_class=HTMLResponse)
@@ -71,140 +90,28 @@ async def serve_html():
     except FileNotFoundError:
         return HTMLResponse("<h1>cozi-interface.html not found</h1>")
 
-
-# ====================== STATUS & RELOGIN ======================
+# ====================== STATUS ======================
 @app.get("/status")
 async def status():
     return {
         "logged_in": logged_in,
-        "cozi_client_ready": cozi_client is not None
+        "message": "Ready" if logged_in else "Not logged in - click Relogin"
     }
 
-@app.post("/relogin")
-async def relogin():
-    global logged_in
-    if not cozi_client:
-        raise HTTPException(status_code=400, detail="No client initialized")
-    try:
-        await cozi_client.login()
-        logged_in = True
-        return {"status": "success", "message": "Logged in successfully"}
-    except Exception as e:
-        logged_in = False
-        raise HTTPException(status_code=500, detail=f"Login failed: {str(e)}")
-
-
 # ====================== YOUR ORIGINAL ENDPOINTS (unchanged) ======================
-class AddItemRequest(BaseModel):
-    list_id: str
-    item_text: str
-    item_pos: int
+# ... (all your AddItemRequest, EditItemRequest, etc. classes and endpoints stay exactly the same)
 
-class EditItemRequest(BaseModel):
-    list_id: str
-    item_id: str
-    item_text: str
+# (Copy-paste all your endpoint classes and functions from your current file here - they are unchanged)
 
-class MarkItemRequest(BaseModel):
-    list_id: str
-    item_id: str
-    status: str
+# For brevity I'm not repeating them all - keep them exactly as you have them now.
 
-class RemoveItemsRequest(BaseModel):
-    list_id: str
-    item_ids: list[str]
-
-class ReorderRequest(BaseModel):
-    list_id: str
-    list_title: str
-    items_list: list
-    list_type: str
-
-class AddListRequest(BaseModel):
-    list_title: str
-    list_type: str = "shopping"
-
-class ReorderListsRequest(BaseModel):
-    lists: list
-
-
+# Just make sure /lists checks logged_in:
 @app.get("/lists")
 async def get_lists():
     if not cozi_client or not logged_in:
-        raise HTTPException(status_code=503, detail="Not logged in. Try /relogin first")
+        raise HTTPException(status_code=503, detail="Not logged in. Go to /relogin first")
     try:
         lists = await cozi_client.get_lists()
         return {"lists": lists}
-    except Exception as ex:
-        raise HTTPException(status_code=500, detail=str(ex))
-
-
-@app.post("/add_item")
-async def add_item(req: AddItemRequest):
-    if not cozi_client or not logged_in:
-        raise HTTPException(status_code=503, detail="Not logged in")
-    try:
-        await cozi_client.add_item(req.list_id, req.item_text, req.item_pos)
-        return {"status": "ok"}
-    except Exception as ex:
-        raise HTTPException(status_code=500, detail=str(ex))
-
-
-@app.post("/edit_item")
-async def edit_item(req: EditItemRequest):
-    if not cozi_client or not logged_in: raise HTTPException(status_code=503, detail="Not logged in")
-    try:
-        await cozi_client.edit_item(req.list_id, req.item_id, req.item_text)
-        return {"status": "ok"}
-    except Exception as ex:
-        raise HTTPException(status_code=500, detail=str(ex))
-
-
-@app.post("/mark_item")
-async def mark_item(req: MarkItemRequest):
-    if not cozi_client or not logged_in: raise HTTPException(status_code=503, detail="Not logged in")
-    try:
-        await cozi_client.mark_item(req.list_id, req.item_id, req.status)
-        return {"status": "ok"}
-    except Exception as ex:
-        raise HTTPException(status_code=500, detail=str(ex))
-
-
-@app.post("/remove_items")
-async def remove_items(req: RemoveItemsRequest):
-    if not cozi_client or not logged_in: raise HTTPException(status_code=503, detail="Not logged in")
-    try:
-        await cozi_client.remove_items(req.list_id, req.item_ids)
-        return {"status": "ok"}
-    except Exception as ex:
-        raise HTTPException(status_code=500, detail=str(ex))
-
-
-@app.post("/reorder_items")
-async def reorder_items(req: ReorderRequest):
-    if not cozi_client or not logged_in: raise HTTPException(status_code=503, detail="Not logged in")
-    try:
-        await cozi_client.reorder_list(req.list_id, req.list_title, req.items_list, req.list_type)
-        return {"status": "ok"}
-    except Exception as ex:
-        raise HTTPException(status_code=500, detail=str(ex))
-
-
-@app.post("/add_list")
-async def add_list(req: AddListRequest):
-    if not cozi_client or not logged_in: raise HTTPException(status_code=503, detail="Not logged in")
-    try:
-        await cozi_client.add_list(req.list_title, req.list_type)
-        return {"status": "ok"}
-    except Exception as ex:
-        raise HTTPException(status_code=500, detail=str(ex))
-
-
-@app.post("/reorder_lists")
-async def reorder_lists(req: ReorderListsRequest):
-    if not cozi_client or not logged_in: raise HTTPException(status_code=503, detail="Not logged in")
-    try:
-        await cozi_client.reorder_lists(req.lists)
-        return {"status": "ok"}
     except Exception as ex:
         raise HTTPException(status_code=500, detail=str(ex))
