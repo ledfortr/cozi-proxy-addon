@@ -21,7 +21,7 @@ app.add_middleware(
 cozi_client: Cozi | None = None
 logged_in = False
 
-# ====================== IMPROVED AUTO LOGIN ======================
+# ====================== AUTO LOGIN WITH CLEANUP ======================
 async def auto_login():
     global cozi_client, logged_in
     print("=== Cozi Proxy: Auto-login starting ===")
@@ -42,8 +42,8 @@ async def auto_login():
 
     print(f"Logging in with username: {username}")
 
-    # Clean up old client if exists
-    if cozi_client:
+    # Clean up old session if exists
+    if cozi_client and hasattr(cozi_client, '_session'):
         try:
             await cozi_client._session.close()
         except:
@@ -67,7 +67,7 @@ async def auto_login():
 async def startup_event():
     await auto_login()
 
-# ====================== RELOGIN (works in browser) ======================
+# ====================== RELOGIN PAGE (browser friendly) ======================
 @app.get("/relogin", response_class=HTMLResponse)
 async def relogin_get():
     status = "✅ Logged in" if logged_in else "❌ Not logged in"
@@ -86,7 +86,7 @@ async def relogin_get():
             const res = await fetch('/relogin', {{ method: 'POST' }});
             const data = await res.json();
             document.getElementById('result').innerHTML = '<strong>' + data.message + '</strong>';
-            if (data.status === 'success') location.reload();
+            if (data.status === 'success') setTimeout(() => location.reload(), 800);
         }}
         </script>
     </body>
@@ -115,7 +115,7 @@ async def status():
         "message": "Ready - lists should load" if logged_in else "Not logged in - go to /relogin"
     }
 
-# ====================== SERVE HTML AT ROOT ======================
+# ====================== SERVE YOUR HTML ======================
 @app.get("/", response_class=HTMLResponse)
 async def serve_html():
     try:
@@ -124,7 +124,7 @@ async def serve_html():
     except FileNotFoundError:
         return HTMLResponse("<h1>cozi-interface.html not found in add-on</h1>")
 
-# ====================== YOUR ORIGINAL ENDPOINTS ======================
+# ====================== YOUR ORIGINAL ENDPOINTS (unchanged) ======================
 class AddItemRequest(BaseModel):
     list_id: str
     item_text: str
