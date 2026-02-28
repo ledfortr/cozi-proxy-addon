@@ -21,7 +21,7 @@ app.add_middleware(
 cozi_client: Cozi | None = None
 logged_in = False
 
-# ====================== AUTO LOGIN WITH CLEANUP ======================
+# ====================== AUTO LOGIN WITH ROBUST CLEANUP ======================
 async def auto_login():
     global cozi_client, logged_in
     print("=== Cozi Proxy: Auto-login starting ===")
@@ -42,7 +42,7 @@ async def auto_login():
 
     print(f"Logging in with username: {username}")
 
-    # Clean up old session if exists
+    # Clean up any previous session
     if cozi_client and hasattr(cozi_client, '_session'):
         try:
             await cozi_client._session.close()
@@ -59,9 +59,9 @@ async def auto_login():
             return
         except Exception as e:
             print(f"❌ Login attempt {attempt+1}/5 failed: {e}")
-            await asyncio.sleep(10)
+            await asyncio.sleep(12)
 
-    print("⚠️ All login attempts failed. Use /relogin to try again.")
+    print("⚠️ All login attempts failed. Use the /relogin button to try again.")
 
 @app.on_event("startup")
 async def startup_event():
@@ -70,23 +70,23 @@ async def startup_event():
 # ====================== RELOGIN PAGE (browser friendly) ======================
 @app.get("/relogin", response_class=HTMLResponse)
 async def relogin_get():
-    status = "✅ Logged in" if logged_in else "❌ Not logged in"
+    status = "✅ Logged in" if logged_in else "❌ Not logged in - Click the button below"
     html = f"""
     <html>
     <head><title>Cozi Proxy - Relogin</title></head>
-    <body style="font-family:Arial; text-align:center; padding:60px; background:#f8f9fa;">
+    <body style="font-family:Arial; text-align:center; padding:80px; background:#f8f9fa;">
         <h1>Cozi Proxy Status</h1>
-        <p style="font-size:18px;"><strong>{status}</strong></p>
-        <button onclick="retry()" style="font-size:18px; padding:15px 40px; background:#ff9800; color:white; border:none; border-radius:8px; cursor:pointer;">
+        <p style="font-size:20px;"><strong>{status}</strong></p>
+        <button onclick="retry()" style="font-size:20px; padding:18px 50px; background:#ff9800; color:white; border:none; border-radius:12px; cursor:pointer;">
             🔄 Retry Login Now
         </button>
-        <p id="result" style="margin-top:20px; font-size:16px;"></p>
+        <p id="result" style="margin-top:30px; font-size:18px; min-height:30px;"></p>
         <script>
         async function retry() {{
             const res = await fetch('/relogin', {{ method: 'POST' }});
             const data = await res.json();
             document.getElementById('result').innerHTML = '<strong>' + data.message + '</strong>';
-            if (data.status === 'success') setTimeout(() => location.reload(), 800);
+            if (data.status === 'success') setTimeout(() => location.reload(), 1000);
         }}
         </script>
     </body>
@@ -112,19 +112,19 @@ async def relogin_post():
 async def status():
     return {
         "logged_in": logged_in,
-        "message": "Ready - lists should load" if logged_in else "Not logged in - go to /relogin"
+        "message": "Ready" if logged_in else "Not logged in - click Relogin"
     }
 
-# ====================== SERVE YOUR HTML ======================
+# ====================== SERVE HTML ======================
 @app.get("/", response_class=HTMLResponse)
 async def serve_html():
     try:
         with open("/cozi_proxy/cozi-interface.html", "r", encoding="utf-8") as f:
             return f.read()
     except FileNotFoundError:
-        return HTMLResponse("<h1>cozi-interface.html not found in add-on</h1>")
+        return HTMLResponse("<h1>cozi-interface.html not found</h1>")
 
-# ====================== YOUR ORIGINAL ENDPOINTS (unchanged) ======================
+# ====================== YOUR ORIGINAL ENDPOINTS ======================
 class AddItemRequest(BaseModel):
     list_id: str
     item_text: str
