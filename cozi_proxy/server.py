@@ -7,6 +7,7 @@ from cozi import Cozi
 from cozi.exceptions import InvalidLoginException, CoziException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
+import aiohttp
 
 app = FastAPI(title="Cozi Proxy")
 
@@ -21,7 +22,7 @@ app.add_middleware(
 cozi_client: Cozi | None = None
 logged_in = False
 
-# ====================== AUTO LOGIN WITH CLEANUP ======================
+# ====================== IMPROVED AUTO LOGIN WITH BROWSER HEADERS ======================
 async def auto_login():
     global cozi_client, logged_in
     print("=== Cozi Proxy: Auto-login starting ===")
@@ -42,23 +43,28 @@ async def auto_login():
 
     print(f"Logging in with username: {username}")
 
-    # Clean up previous client if it exists
-    if cozi_client and hasattr(cozi_client, '_session'):
-        try:
-            await cozi_client._session.close()
-        except:
-            pass
+    # Create a real browser-like session
+    session = aiohttp.ClientSession(
+        headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Referer": "https://www.cozi.com/",
+            "Origin": "https://www.cozi.com",
+        }
+    )
 
     cozi_client = Cozi(username, password)
+    cozi_client._session = session  # Override with our browser session
 
-    for attempt in range(5):
+    for attempt in range(6):
         try:
             await cozi_client.login()
             print("✅ Login successful!")
             logged_in = True
             return
         except Exception as e:
-            print(f"❌ Login attempt {attempt+1}/5 failed: {e}")
+            print(f"❌ Login attempt {attempt+1}/6 failed: {e}")
             await asyncio.sleep(12)
 
     print("⚠️ All login attempts failed. Use /relogin to try again.")
@@ -67,7 +73,6 @@ async def auto_login():
 async def startup_event():
     await auto_login()
 
-# ====================== CLEAN SHUTDOWN ======================
 @app.on_event("shutdown")
 async def shutdown_event():
     global cozi_client
