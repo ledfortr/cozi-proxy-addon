@@ -21,7 +21,7 @@ app.add_middleware(
 cozi_client: Cozi | None = None
 logged_in = False
 
-# ====================== AUTO LOGIN WITH ROBUST CLEANUP ======================
+# ====================== AUTO LOGIN WITH CLEANUP ======================
 async def auto_login():
     global cozi_client, logged_in
     print("=== Cozi Proxy: Auto-login starting ===")
@@ -42,7 +42,7 @@ async def auto_login():
 
     print(f"Logging in with username: {username}")
 
-    # Clean up any previous session
+    # Clean up previous client if it exists
     if cozi_client and hasattr(cozi_client, '_session'):
         try:
             await cozi_client._session.close()
@@ -61,11 +61,22 @@ async def auto_login():
             print(f"❌ Login attempt {attempt+1}/5 failed: {e}")
             await asyncio.sleep(12)
 
-    print("⚠️ All login attempts failed. Use the /relogin button to try again.")
+    print("⚠️ All login attempts failed. Use /relogin to try again.")
 
 @app.on_event("startup")
 async def startup_event():
     await auto_login()
+
+# ====================== CLEAN SHUTDOWN ======================
+@app.on_event("shutdown")
+async def shutdown_event():
+    global cozi_client
+    if cozi_client and hasattr(cozi_client, '_session'):
+        try:
+            await cozi_client._session.close()
+            print("✅ Session closed on shutdown")
+        except:
+            pass
 
 # ====================== RELOGIN PAGE (browser friendly) ======================
 @app.get("/relogin", response_class=HTMLResponse)
@@ -112,17 +123,17 @@ async def relogin_post():
 async def status():
     return {
         "logged_in": logged_in,
-        "message": "Ready" if logged_in else "Not logged in - click Relogin"
+        "message": "Ready - lists should load" if logged_in else "Not logged in - go to /relogin"
     }
 
-# ====================== SERVE HTML ======================
+# ====================== SERVE YOUR HTML ======================
 @app.get("/", response_class=HTMLResponse)
 async def serve_html():
     try:
         with open("/cozi_proxy/cozi-interface.html", "r", encoding="utf-8") as f:
             return f.read()
     except FileNotFoundError:
-        return HTMLResponse("<h1>cozi-interface.html not found</h1>")
+        return HTMLResponse("<h1>cozi-interface.html not found in add-on</h1>")
 
 # ====================== YOUR ORIGINAL ENDPOINTS ======================
 class AddItemRequest(BaseModel):
