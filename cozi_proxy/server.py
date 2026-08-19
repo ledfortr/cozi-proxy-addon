@@ -565,7 +565,16 @@ def _map_columns(fieldnames):
     return cols
 
 
+_sync_gate = asyncio.Lock()
+
+
 async def _sync_chores():
+    """Serialised so concurrent callers can't each push the same new chore."""
+    async with _sync_gate:
+        return await _do_sync()
+
+
+async def _do_sync():
     """Reconcile local chores with Cozi + sheet. Never drops a claimed chore."""
     cozi_items, list_ids, cozi_err = await _from_cozi()
     d0 = _chores_read()
@@ -617,8 +626,13 @@ async def _sync_chores():
                 keep.append(c)
             d["chores"] = keep
 
+        # Only push what Cozi doesn't already have. Without this the same chore is
+        # re-pushed on every sync until the read-back flips its source, which piles
+        # up hundreds of duplicate list items.
         for c in d["chores"]:
-            if c.get("source") == "dashboard" and list_ids.get(c.get("kind", "required")):
+            if (c.get("source") == "dashboard"
+                    and list_ids.get(c.get("kind", "required"))
+                    and _norm(c["name"]) not in cozi_items):
                 push.append((list_ids[c["kind"]], _fmt_item(c)))
 
         rolled = _maybe_roll(d)
@@ -712,7 +726,6 @@ async def chores_add(req: ChoreAdd):
                             "done_by": None, "source": "dashboard"})
         d["next_id"] = cid + 1
         _chores_write(d)
-    asyncio.create_task(_sync_chores())
     return {"status": "ok", "id": cid}
 
 
