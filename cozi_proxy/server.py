@@ -72,6 +72,7 @@ async def auto_login():
 @app.on_event("startup")
 async def startup_event():
     await auto_login()
+    asyncio.create_task(_sync_loop())     # keeps chores reconciled with Cozi + sheet
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -261,12 +262,25 @@ async def reorder_lists(req: ReorderListsRequest):
     except Exception as ex:
         raise HTTPException(status_code=500, detail=str(ex))
 
-# ====================== STANDALONE CHORES / LEDPOINTS (local JSON, no Cozi) ======================
+# ====================== CHORES / LEDPOINTS ======================
+# Local JSON is the store; Cozi lists and an optional published-CSV spreadsheet are
+# additional INPUT channels that stay reconciled with it. Chores are matched across
+# all three sources by normalised name, so the same chore never lands twice.
+import re
+import csv
+import io
+import datetime
+
 CHORES_DB = "/data/chores.json"
 _chores_lock = asyncio.Lock()
 
+# Cozi list titles that feed the two buckets (case-insensitive).
+COZI_LISTS = {"chores required": "required", "chores optional": "optional"}
+SYNC_EVERY = 300  # seconds
+
 def _chores_default():
-    return {"target": 100, "chores": [], "log": {"ian": [], "evan": []}, "week_start": None, "next_id": 1}
+    return {"target": 100, "chores": [], "log": {"ian": [], "evan": []}, "week_start": None,
+            "next_id": 1, "sheet_url": "", "last_sync": None, "sync_error": "", "sync_note": ""}
 
 def _chores_read():
     if not os.path.exists(CHORES_DB):
@@ -278,6 +292,9 @@ def _chores_read():
         base.update(d or {})
         base.setdefault("log", {}).setdefault("ian", [])
         base["log"].setdefault("evan", [])
+        for c in base.get("chores", []):          # migrate pre-1.5 rows
+            c.setdefault("kind", "required")
+            c.setdefault("source", "dashboard")
         return base
     except Exception:
         return _chores_default()
@@ -288,17 +305,186 @@ def _chores_write(d):
         json.dump(d, f)
     os.replace(tmp, CHORES_DB)
 
+def _norm(name):
+    """Match key across Cozi / sheet / dashboard: case- and space-insensitive."""
+    return re.sub(r"\s+", " ", (name or "").strip().lower())
+
+_PTS_RE = re.compile(r"\[\s*(\d+)\s*\]")
+
+def _parse_item(text):
+    """`Unload dishwasher [10] Put everything away` -> (name, 10, description)."""
+    text = (text or "").strip()
+    m = _PTS_RE.search(text)
+    if not m:
+        return text, 0, ""
+    return (text[:m.start()].strip(" -:–—"),
+            int(m.group(1)),
+            text[m.end():].strip(" -:–—"))
+
+def _fmt_item(c):
+    """Inverse of _parse_item, for pushing dashboard-added chores back into Cozi."""
+    s = "%s [%d]" % (c["name"], int(c.get("points", 0)))
+    if c.get("description"):
+        s += " " + c["description"]
+    return s
+
+def _gate(chores):
+    """Optional chores stay locked until every required chore is claimed."""
+    req = [c for c in chores if c.get("kind", "required") == "required"]
+    left = [c for c in req if not c.get("done_by")]
+    return {"required_total": len(req), "required_left": len(left),
+            "optional_unlocked": len(left) == 0}
+
+
+# ---------------------------------------------------------------- sync sources
+async def _from_cozi():
+    """{norm_name: chore-ish} from the two Cozi lists, plus the list ids we found."""
+    out, list_ids = {}, {}
+    if not cozi_client or not logged_in:
+        return out, list_ids, "Cozi not connected"
+    lists = await cozi_client.get_lists()
+    for l in (lists or []):
+        kind = COZI_LISTS.get((l.get("title") or "").strip().lower())
+        if not kind:
+            continue
+        list_ids[kind] = l.get("listId") or l.get("list_id")
+        for it in (l.get("items") or []):
+            if it.get("itemType") == "header":
+                continue
+            name, pts, desc = _parse_item(it.get("text"))
+            if not name:
+                continue
+            out[_norm(name)] = {"name": name, "points": pts, "description": desc,
+                                "kind": kind, "source": "cozi"}
+    return out, list_ids, ""
+
+async def _from_sheet(url):
+    """{norm_name: chore-ish} from a Google Sheet published as CSV."""
+    out = {}
+    if not url:
+        return out, ""
+    try:
+        timeout = aiohttp.ClientTimeout(total=20)
+        async with aiohttp.ClientSession(timeout=timeout) as s:
+            async with s.get(url) as r:
+                if r.status != 200:
+                    return out, "sheet HTTP %d" % r.status
+                body = await r.text()
+    except Exception as ex:
+        return out, "sheet fetch failed: %s" % str(ex)[:80]
+
+    try:
+        rows = list(csv.DictReader(io.StringIO(body)))
+    except Exception as ex:
+        return out, "sheet parse failed: %s" % str(ex)[:80]
+
+    def col(row, *names):
+        for k, v in row.items():
+            if (k or "").strip().lower() in names:
+                return (v or "").strip()
+        return ""
+
+    for row in rows:
+        name = col(row, "chore", "name", "task", "job")
+        if not name:
+            continue
+        try:
+            pts = int(float(col(row, "points", "ledpoints", "pts") or 0))
+        except ValueError:
+            pts = 0
+        kind = col(row, "type", "kind", "required").lower()
+        kind = "optional" if kind.startswith("o") else "required"
+        out[_norm(name)] = {"name": name, "points": pts,
+                            "description": col(row, "description", "details", "how", "notes"),
+                            "kind": kind, "source": "sheet"}
+    return out, ""
+
+
+async def _sync_chores():
+    """Reconcile local chores with Cozi + sheet. Never drops a claimed chore."""
+    cozi_items, list_ids, cozi_err = await _from_cozi()
+    d = _chores_read()
+    sheet_items, sheet_err = await _from_sheet(d.get("sheet_url") or "")
+
+    ext = {}
+    ext.update(sheet_items)
+    ext.update(cozi_items)          # Cozi wins on conflict -- it's the family's shared list
+
+    push = []
+    async with _chores_lock:
+        d = _chores_read()
+        local = {}
+        for c in d["chores"]:
+            local.setdefault(_norm(c["name"]), c)
+
+        # add new / refresh existing (claims and ids are preserved)
+        for key, e in ext.items():
+            c = local.get(key)
+            if c:
+                c.update({"name": e["name"], "points": e["points"],
+                          "description": e["description"], "kind": e["kind"]})
+                if c.get("source") == "dashboard":
+                    c["source"] = e["source"]      # adopted by the shared list now
+            else:
+                cid = d.get("next_id", 1)
+                d["next_id"] = cid + 1
+                nc = {"id": cid, "name": e["name"], "points": e["points"],
+                      "description": e["description"], "kind": e["kind"],
+                      "done_by": None, "source": e["source"]}
+                d["chores"].append(nc)
+                local[key] = nc
+
+        # anything that came from a shared source and has since vanished there goes
+        # away here too -- unless a kid already claimed it this week
+        if not cozi_err:
+            keep = []
+            for c in d["chores"]:
+                gone = c.get("source") in ("cozi", "sheet") and _norm(c["name"]) not in ext
+                if gone and not c.get("done_by"):
+                    continue
+                keep.append(c)
+            d["chores"] = keep
+
+        # dashboard-added chores get pushed up to Cozi so the family sees them there
+        for c in d["chores"]:
+            if c.get("source") == "dashboard" and list_ids.get(c.get("kind", "required")):
+                push.append((list_ids[c["kind"]], _fmt_item(c)))
+
+        d["last_sync"] = datetime.datetime.now().isoformat(timespec="seconds")
+        d["sync_error"] = cozi_err or sheet_err or ""
+        d["sync_note"] = "cozi:%d sheet:%d" % (len(cozi_items), len(sheet_items))
+        _chores_write(d)
+
+    for list_id, text in push:
+        try:
+            await cozi_client.add_item(list_id, text, 0)
+        except Exception:
+            pass                      # stays local; next sync retries
+    return {"cozi": len(cozi_items), "sheet": len(sheet_items),
+            "pushed": len(push), "error": cozi_err or sheet_err or ""}
+
+
+async def _sync_loop():
+    while True:
+        try:
+            await _sync_chores()
+        except Exception as ex:
+            print("chores sync failed:", ex)
+        await asyncio.sleep(SYNC_EVERY)
+
 
 class ChoreAdd(BaseModel):
     name: str
     points: int = 0
     description: str = ""
+    kind: str = "required"
 
 class ChoreEdit(BaseModel):
     id: int
     name: str | None = None
     points: int | None = None
     description: str | None = None
+    kind: str | None = None
 
 class ChoreId(BaseModel):
     id: int
@@ -310,13 +496,20 @@ class ChoreClaim(BaseModel):
 class ChoreTarget(BaseModel):
     target: int
 
+class SheetUrl(BaseModel):
+    url: str
+
 
 @app.get("/chores")
 async def chores_get():
     d = _chores_read()
     totals = {k: sum(int(e.get("points", 0)) for e in v) for k, v in d["log"].items()}
-    return {"target": d.get("target", 100), "chores": d["chores"], "log": d["log"], "totals": totals,
-            "week_start": d.get("week_start")}
+    out = {"target": d.get("target", 100), "chores": d["chores"], "log": d["log"],
+           "totals": totals, "week_start": d.get("week_start"),
+           "sheet_url": d.get("sheet_url", ""), "last_sync": d.get("last_sync"),
+           "sync_error": d.get("sync_error", ""), "sync_note": d.get("sync_note", "")}
+    out.update(_gate(d["chores"]))
+    return out
 
 @app.post("/chores/add")
 async def chores_add(req: ChoreAdd):
@@ -324,9 +517,12 @@ async def chores_add(req: ChoreAdd):
         d = _chores_read()
         cid = d.get("next_id", 1)
         d["chores"].append({"id": cid, "name": req.name.strip(), "points": int(req.points),
-                            "description": (req.description or "").strip(), "done_by": None})
+                            "description": (req.description or "").strip(),
+                            "kind": "optional" if req.kind == "optional" else "required",
+                            "done_by": None, "source": "dashboard"})
         d["next_id"] = cid + 1
         _chores_write(d)
+    asyncio.create_task(_sync_chores())      # push it to Cozi promptly
     return {"status": "ok", "id": cid}
 
 @app.post("/chores/edit")
@@ -338,6 +534,8 @@ async def chores_edit(req: ChoreEdit):
                 if req.name is not None: c["name"] = req.name.strip()
                 if req.points is not None: c["points"] = int(req.points)
                 if req.description is not None: c["description"] = req.description.strip()
+                if req.kind is not None:
+                    c["kind"] = "optional" if req.kind == "optional" else "required"
         _chores_write(d)
     return {"status": "ok"}
 
@@ -361,6 +559,11 @@ async def chores_claim(req: ChoreClaim):
             raise HTTPException(status_code=404, detail="chore not found")
         if target.get("done_by"):
             raise HTTPException(status_code=409, detail="already claimed")
+        gate = _gate(d["chores"])
+        if target.get("kind", "required") == "optional" and not gate["optional_unlocked"]:
+            raise HTTPException(status_code=423,
+                                detail="Finish the %d required chore(s) first"
+                                       % gate["required_left"])
         target["done_by"] = kid
         d["log"][kid].append({"chore_id": target["id"], "name": target["name"],
                               "points": int(target.get("points", 0))})
@@ -387,9 +590,20 @@ async def chores_target(req: ChoreTarget):
         _chores_write(d)
     return {"status": "ok"}
 
+@app.post("/chores/sheeturl")
+async def chores_sheeturl(req: SheetUrl):
+    async with _chores_lock:
+        d = _chores_read()
+        d["sheet_url"] = (req.url or "").strip()
+        _chores_write(d)
+    return await _sync_chores()
+
+@app.post("/chores/sync")
+async def chores_sync():
+    return await _sync_chores()
+
 @app.post("/chores/newweek")
 async def chores_newweek():
-    import datetime
     async with _chores_lock:
         d = _chores_read()
         d["log"] = {"ian": [], "evan": []}
