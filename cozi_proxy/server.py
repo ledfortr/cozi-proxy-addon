@@ -372,12 +372,33 @@ def _parse_item(text):
             text[m.end():].strip(" -:–—"))
 
 
+COZI_MAX = 250          # Cozi silently truncates list-item text around here
+
+
 def _fmt_item(c):
-    """Inverse of _parse_item, for pushing dashboard-added chores into Cozi."""
+    """Inverse of _parse_item, for pushing dashboard-added chores into Cozi.
+    Trimmed on a word boundary so Cozi's own truncation never cuts mid-word."""
     s = "%s [%d]" % (c["name"], int(c.get("points", 0)))
-    if c.get("description"):
-        s += " " + c["description"]
+    desc = (c.get("description") or "").strip()
+    if desc:
+        room = COZI_MAX - len(s) - 1
+        if len(desc) > room:
+            desc = desc[:room].rsplit(" ", 1)[0].rstrip(" ,.;—-") + "…"
+        s += " " + desc
     return s
+
+
+def _merge_desc(old, new):
+    """Cozi caps item text, so the description that comes back can be a truncated
+    prefix of what we hold. Never let that shorter copy overwrite the full one."""
+    old, new = (old or "").strip(), (new or "").strip()
+    if not new:
+        return old
+    if old and len(new) < len(old):
+        stem = new.rstrip("…").rstrip()
+        if old.startswith(stem[:max(1, len(stem) - 2)]):
+            return old
+    return new
 
 
 def _due_date(c):
@@ -570,7 +591,8 @@ async def _sync_chores():
             c = local.get(key)
             if c:
                 c.update({"name": e["name"], "points": e["points"],
-                          "description": e["description"], "kind": e["kind"]})
+                          "description": _merge_desc(c.get("description"), e["description"]),
+                          "kind": e["kind"]})
                 if e.get("frequency"):
                     c["frequency"] = e["frequency"]
                 if c.get("source") == "dashboard":
