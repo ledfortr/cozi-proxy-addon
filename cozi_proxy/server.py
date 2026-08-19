@@ -260,3 +260,141 @@ async def reorder_lists(req: ReorderListsRequest):
         return {"status": "ok"}
     except Exception as ex:
         raise HTTPException(status_code=500, detail=str(ex))
+
+# ====================== STANDALONE CHORES / LEDPOINTS (local JSON, no Cozi) ======================
+CHORES_DB = "/data/chores.json"
+_chores_lock = asyncio.Lock()
+
+def _chores_default():
+    return {"target": 100, "chores": [], "log": {"ian": [], "evan": []}, "week_start": None, "next_id": 1}
+
+def _chores_read():
+    if not os.path.exists(CHORES_DB):
+        return _chores_default()
+    try:
+        with open(CHORES_DB, "r") as f:
+            d = json.load(f)
+        base = _chores_default()
+        base.update(d or {})
+        base.setdefault("log", {}).setdefault("ian", [])
+        base["log"].setdefault("evan", [])
+        return base
+    except Exception:
+        return _chores_default()
+
+def _chores_write(d):
+    tmp = CHORES_DB + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(d, f)
+    os.replace(tmp, CHORES_DB)
+
+
+class ChoreAdd(BaseModel):
+    name: str
+    points: int = 0
+    description: str = ""
+
+class ChoreEdit(BaseModel):
+    id: int
+    name: str | None = None
+    points: int | None = None
+    description: str | None = None
+
+class ChoreId(BaseModel):
+    id: int
+
+class ChoreClaim(BaseModel):
+    id: int
+    kid: str
+
+class ChoreTarget(BaseModel):
+    target: int
+
+
+@app.get("/chores")
+async def chores_get():
+    d = _chores_read()
+    totals = {k: sum(int(e.get("points", 0)) for e in v) for k, v in d["log"].items()}
+    return {"target": d.get("target", 100), "chores": d["chores"], "log": d["log"], "totals": totals,
+            "week_start": d.get("week_start")}
+
+@app.post("/chores/add")
+async def chores_add(req: ChoreAdd):
+    async with _chores_lock:
+        d = _chores_read()
+        cid = d.get("next_id", 1)
+        d["chores"].append({"id": cid, "name": req.name.strip(), "points": int(req.points),
+                            "description": (req.description or "").strip(), "done_by": None})
+        d["next_id"] = cid + 1
+        _chores_write(d)
+    return {"status": "ok", "id": cid}
+
+@app.post("/chores/edit")
+async def chores_edit(req: ChoreEdit):
+    async with _chores_lock:
+        d = _chores_read()
+        for c in d["chores"]:
+            if c["id"] == req.id:
+                if req.name is not None: c["name"] = req.name.strip()
+                if req.points is not None: c["points"] = int(req.points)
+                if req.description is not None: c["description"] = req.description.strip()
+        _chores_write(d)
+    return {"status": "ok"}
+
+@app.post("/chores/delete")
+async def chores_delete(req: ChoreId):
+    async with _chores_lock:
+        d = _chores_read()
+        d["chores"] = [c for c in d["chores"] if c["id"] != req.id]
+        _chores_write(d)
+    return {"status": "ok"}
+
+@app.post("/chores/claim")
+async def chores_claim(req: ChoreClaim):
+    kid = req.kid.lower()
+    async with _chores_lock:
+        d = _chores_read()
+        if kid not in d["log"]:
+            d["log"][kid] = []
+        target = next((c for c in d["chores"] if c["id"] == req.id), None)
+        if not target:
+            raise HTTPException(status_code=404, detail="chore not found")
+        if target.get("done_by"):
+            raise HTTPException(status_code=409, detail="already claimed")
+        target["done_by"] = kid
+        d["log"][kid].append({"chore_id": target["id"], "name": target["name"],
+                              "points": int(target.get("points", 0))})
+        _chores_write(d)
+    return {"status": "ok"}
+
+@app.post("/chores/unclaim")
+async def chores_unclaim(req: ChoreId):
+    async with _chores_lock:
+        d = _chores_read()
+        for c in d["chores"]:
+            if c["id"] == req.id and c.get("done_by"):
+                kid = c["done_by"]
+                c["done_by"] = None
+                d["log"][kid] = [e for e in d["log"].get(kid, []) if e.get("chore_id") != req.id]
+        _chores_write(d)
+    return {"status": "ok"}
+
+@app.post("/chores/target")
+async def chores_target(req: ChoreTarget):
+    async with _chores_lock:
+        d = _chores_read()
+        d["target"] = int(req.target)
+        _chores_write(d)
+    return {"status": "ok"}
+
+@app.post("/chores/newweek")
+async def chores_newweek():
+    import datetime
+    async with _chores_lock:
+        d = _chores_read()
+        d["log"] = {"ian": [], "evan": []}
+        for c in d["chores"]:
+            c["done_by"] = None
+        d["week_start"] = datetime.date.today().isoformat()
+        _chores_write(d)
+    return {"status": "ok"}
