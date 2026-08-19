@@ -266,6 +266,12 @@ async def reorder_lists(req: ReorderListsRequest):
 # Local JSON is the store; Cozi lists and an optional published-CSV spreadsheet are
 # additional INPUT channels that stay reconciled with it. Chores are matched across
 # all three sources by normalised name, so the same chore never lands twice.
+#
+# FREQUENCY ROTATION: the board is re-posted once a week (anchored to Monday). A
+# chore only goes back up once its interval has elapsed since it was last completed,
+# so a monthly job done on the 3rd stays off the board until the 2nd of next month.
+# The spreadsheet is the source of truth for each chore's frequency; the "last done"
+# dates live here because only this service sees claims as they happen.
 import re
 import csv
 import io
@@ -274,13 +280,50 @@ import datetime
 CHORES_DB = "/data/chores.json"
 _chores_lock = asyncio.Lock()
 
-# Cozi list titles that feed the two buckets (case-insensitive).
 COZI_LISTS = {"chores required": "required", "chores optional": "optional"}
 SYNC_EVERY = 300  # seconds
 
+FREQ_DAYS = {"weekly": 7, "bi-weekly": 14, "biweekly": 14, "monthly": 30}
+FREQ_CANON = {"weekly": "weekly", "bi-weekly": "bi-weekly", "biweekly": "bi-weekly",
+              "monthly": "monthly"}
+DEFAULT_FREQ = "weekly"
+
+
+def _freq(value):
+    v = re.sub(r"[^a-z]", "", (value or "").lower())
+    if v.startswith("bi") or v.startswith("every2") or v.startswith("fort"):
+        return "bi-weekly"
+    if v.startswith("mo"):
+        return "monthly"
+    if v.startswith("we") or v.startswith("每"):
+        return "weekly"
+    return None
+
+
+def _freq_days(f):
+    return FREQ_DAYS.get((f or DEFAULT_FREQ).lower(), 7)
+
+
+def _today():
+    return datetime.date.today()
+
+
+def _monday(d):
+    return d - datetime.timedelta(days=d.weekday())
+
+
+def _parse_date(s):
+    try:
+        return datetime.date.fromisoformat(s)
+    except Exception:
+        return None
+
+
 def _chores_default():
     return {"target": 100, "chores": [], "log": {"ian": [], "evan": []}, "week_start": None,
-            "next_id": 1, "sheet_url": "", "last_sync": None, "sync_error": "", "sync_note": ""}
+            "next_id": 1, "sheet_url": "", "last_sync": None, "sync_error": "", "sync_note": "",
+            "history": []}
+
 
 def _chores_read():
     if not os.path.exists(CHORES_DB):
@@ -292,12 +335,16 @@ def _chores_read():
         base.update(d or {})
         base.setdefault("log", {}).setdefault("ian", [])
         base["log"].setdefault("evan", [])
-        for c in base.get("chores", []):          # migrate pre-1.5 rows
+        for c in base.get("chores", []):          # migrate older rows
             c.setdefault("kind", "required")
             c.setdefault("source", "dashboard")
+            c.setdefault("frequency", DEFAULT_FREQ)
+            c.setdefault("last_done", None)
+            c.setdefault("posted", True)
         return base
     except Exception:
         return _chores_default()
+
 
 def _chores_write(d):
     tmp = CHORES_DB + ".tmp"
@@ -305,11 +352,14 @@ def _chores_write(d):
         json.dump(d, f)
     os.replace(tmp, CHORES_DB)
 
+
 def _norm(name):
     """Match key across Cozi / sheet / dashboard: case- and space-insensitive."""
     return re.sub(r"\s+", " ", (name or "").strip().lower())
 
+
 _PTS_RE = re.compile(r"\[\s*(\d+)\s*\]")
+
 
 def _parse_item(text):
     """`Unload dishwasher [10] Put everything away` -> (name, 10, description)."""
@@ -321,24 +371,84 @@ def _parse_item(text):
             int(m.group(1)),
             text[m.end():].strip(" -:–—"))
 
+
 def _fmt_item(c):
-    """Inverse of _parse_item, for pushing dashboard-added chores back into Cozi."""
+    """Inverse of _parse_item, for pushing dashboard-added chores into Cozi."""
     s = "%s [%d]" % (c["name"], int(c.get("points", 0)))
     if c.get("description"):
         s += " " + c["description"]
     return s
 
+
+def _due_date(c):
+    """When this chore is next allowed on the board."""
+    ld = _parse_date(c.get("last_done") or "")
+    if not ld:
+        return None                      # never done -> eligible now
+    return ld + datetime.timedelta(days=_freq_days(c.get("frequency")))
+
+
+def _is_due(c, on=None):
+    d = _due_date(c)
+    return True if d is None else d <= (on or _today())
+
+
+def _repost(d, on=None):
+    """Decide what sits on the board. Unfinished chores stay up; completed ones
+    come back only once their frequency interval has elapsed."""
+    on = on or _today()
+    for c in d["chores"]:
+        c["posted"] = _is_due(c, on)
+
+
 def _gate(chores):
-    """Optional chores stay locked until every required chore is claimed."""
-    req = [c for c in chores if c.get("kind", "required") == "required"]
+    """Optional chores stay locked until every POSTED required chore is claimed."""
+    req = [c for c in chores
+           if c.get("kind", "required") == "required" and c.get("posted", True)]
     left = [c for c in req if not c.get("done_by")]
     return {"required_total": len(req), "required_left": len(left),
             "optional_unlocked": len(left) == 0}
 
 
+def _roll_week(d, on=None):
+    """Close out the week: stamp completions, clear the board, re-post what's due."""
+    on = on or _today()
+    done = [c for c in d["chores"] if c.get("done_by")]
+    for c in done:
+        c["last_done"] = on.isoformat()
+    if done:
+        d.setdefault("history", []).append({
+            "week_start": d.get("week_start"),
+            "closed": on.isoformat(),
+            "totals": {k: sum(int(e.get("points", 0)) for e in v) for k, v in d["log"].items()},
+            "completed": [{"name": c["name"], "by": c["done_by"],
+                           "points": c.get("points", 0)} for c in done],
+        })
+        d["history"] = d["history"][-52:]          # keep a year
+    for c in d["chores"]:
+        c["done_by"] = None
+    d["log"] = {"ian": [], "evan": []}
+    d["week_start"] = _monday(on).isoformat()
+    _repost(d, on)
+    return len(done)
+
+
+def _maybe_roll(d):
+    """Auto-advance on Monday; catches up if the box was off."""
+    today = _today()
+    this_monday = _monday(today)
+    ws = _parse_date(d.get("week_start") or "")
+    if ws is None or ws < this_monday:
+        _roll_week(d, today)
+        return True
+    return False
+
+
 # ---------------------------------------------------------------- sync sources
 async def _from_cozi():
-    """{norm_name: chore-ish} from the two Cozi lists, plus the list ids we found."""
+    """{norm_name: chore-ish} from the two Cozi lists, plus the list ids we found.
+    Cozi item text can't carry a frequency, so those entries leave it as None and
+    the reconcile step keeps whatever the sheet (or an earlier add) already set."""
     out, list_ids = {}, {}
     if not cozi_client or not logged_in:
         return out, list_ids, "Cozi not connected"
@@ -355,8 +465,9 @@ async def _from_cozi():
             if not name:
                 continue
             out[_norm(name)] = {"name": name, "points": pts, "description": desc,
-                                "kind": kind, "source": "cozi"}
+                                "kind": kind, "source": "cozi", "frequency": None}
     return out, list_ids, ""
+
 
 async def _from_sheet(url):
     """{norm_name: chore-ish} from a Google Sheet published as CSV."""
@@ -374,7 +485,7 @@ async def _from_sheet(url):
         return out, "sheet fetch failed: %s" % str(ex)[:80]
 
     try:
-        body = body.lstrip("﻿")                     # Google prepends a BOM
+        body = body.lstrip("﻿")                # Google prepends a BOM
         rows = list(csv.DictReader(io.StringIO(body)))
     except Exception as ex:
         return out, "sheet parse failed: %s" % str(ex)[:80]
@@ -399,12 +510,13 @@ async def _from_sheet(url):
         kind = "optional" if val(row, "kind").lower().startswith("o") else "required"
         out[_norm(name)] = {"name": name, "points": pts,
                             "description": val(row, "description"),
-                            "kind": kind, "source": "sheet"}
+                            "kind": kind, "source": "sheet",
+                            "frequency": _freq(val(row, "frequency"))}
     return out, ""
 
 
 def _map_columns(fieldnames):
-    """Map whatever the family typed as headers onto our four fields.
+    """Map whatever the family typed as headers onto our fields.
 
     Real headers in use are things like "Chore Title", "Chore Steps/Details" and
     "Type (Required / Optional)", so match on substrings rather than exact names.
@@ -424,6 +536,7 @@ def _map_columns(fieldnames):
                 taken.add(h)
                 return
 
+    claim("frequency", "frequen", "how often", "repeat", "cadence", "schedule")
     claim("description", "detail", "step", "descri", "how", "note", "instruction")
     claim("points", "point", "pts", "value", "worth")
     claim("kind", "type", "kind", "required", "optional", "categ")
@@ -434,12 +547,17 @@ def _map_columns(fieldnames):
 async def _sync_chores():
     """Reconcile local chores with Cozi + sheet. Never drops a claimed chore."""
     cozi_items, list_ids, cozi_err = await _from_cozi()
-    d = _chores_read()
-    sheet_items, sheet_err = await _from_sheet(d.get("sheet_url") or "")
+    d0 = _chores_read()
+    sheet_items, sheet_err = await _from_sheet(d0.get("sheet_url") or "")
 
-    ext = {}
-    ext.update(sheet_items)
-    ext.update(cozi_items)          # Cozi wins on conflict -- it's the family's shared list
+    # Cozi wins on the text fields (it's the shared list the family edits), but the
+    # sheet keeps ownership of frequency since Cozi can't express one.
+    ext = dict(sheet_items)
+    for k, v in cozi_items.items():
+        if k in ext:
+            v = dict(v)
+            v["frequency"] = ext[k].get("frequency")
+        ext[k] = v
 
     push = []
     async with _chores_lock:
@@ -448,25 +566,26 @@ async def _sync_chores():
         for c in d["chores"]:
             local.setdefault(_norm(c["name"]), c)
 
-        # add new / refresh existing (claims and ids are preserved)
         for key, e in ext.items():
             c = local.get(key)
             if c:
                 c.update({"name": e["name"], "points": e["points"],
                           "description": e["description"], "kind": e["kind"]})
+                if e.get("frequency"):
+                    c["frequency"] = e["frequency"]
                 if c.get("source") == "dashboard":
-                    c["source"] = e["source"]      # adopted by the shared list now
+                    c["source"] = e["source"]
             else:
                 cid = d.get("next_id", 1)
                 d["next_id"] = cid + 1
                 nc = {"id": cid, "name": e["name"], "points": e["points"],
                       "description": e["description"], "kind": e["kind"],
+                      "frequency": e.get("frequency") or DEFAULT_FREQ,
+                      "last_done": None, "posted": True,
                       "done_by": None, "source": e["source"]}
                 d["chores"].append(nc)
                 local[key] = nc
 
-        # anything that came from a shared source and has since vanished there goes
-        # away here too -- unless a kid already claimed it this week
         if not cozi_err:
             keep = []
             for c in d["chores"]:
@@ -476,11 +595,13 @@ async def _sync_chores():
                 keep.append(c)
             d["chores"] = keep
 
-        # dashboard-added chores get pushed up to Cozi so the family sees them there
         for c in d["chores"]:
             if c.get("source") == "dashboard" and list_ids.get(c.get("kind", "required")):
                 push.append((list_ids[c["kind"]], _fmt_item(c)))
 
+        rolled = _maybe_roll(d)
+        if not rolled:
+            _repost(d)
         d["last_sync"] = datetime.datetime.now().isoformat(timespec="seconds")
         d["sync_error"] = cozi_err or sheet_err or ""
         d["sync_note"] = "cozi:%d sheet:%d" % (len(cozi_items), len(sheet_items))
@@ -490,9 +611,9 @@ async def _sync_chores():
         try:
             await cozi_client.add_item(list_id, text, 0)
         except Exception:
-            pass                      # stays local; next sync retries
-    return {"cozi": len(cozi_items), "sheet": len(sheet_items),
-            "pushed": len(push), "error": cozi_err or sheet_err or ""}
+            pass
+    return {"cozi": len(cozi_items), "sheet": len(sheet_items), "pushed": len(push),
+            "rolled": rolled, "error": cozi_err or sheet_err or ""}
 
 
 async def _sync_loop():
@@ -509,6 +630,7 @@ class ChoreAdd(BaseModel):
     points: int = 0
     description: str = ""
     kind: str = "required"
+    frequency: str = DEFAULT_FREQ
 
 class ChoreEdit(BaseModel):
     id: int
@@ -516,6 +638,7 @@ class ChoreEdit(BaseModel):
     points: int | None = None
     description: str | None = None
     kind: str | None = None
+    frequency: str | None = None
 
 class ChoreId(BaseModel):
     id: int
@@ -531,16 +654,28 @@ class SheetUrl(BaseModel):
     url: str
 
 
+def _decorate(c):
+    out = dict(c)
+    dd = _due_date(c)
+    out["next_due"] = dd.isoformat() if dd else None
+    out["days_until_due"] = max(0, (dd - _today()).days) if dd else 0
+    return out
+
+
 @app.get("/chores")
 async def chores_get():
     d = _chores_read()
     totals = {k: sum(int(e.get("points", 0)) for e in v) for k, v in d["log"].items()}
-    out = {"target": d.get("target", 100), "chores": d["chores"], "log": d["log"],
+    chores = [_decorate(c) for c in d["chores"]]
+    out = {"target": d.get("target", 100), "chores": chores, "log": d["log"],
            "totals": totals, "week_start": d.get("week_start"),
            "sheet_url": d.get("sheet_url", ""), "last_sync": d.get("last_sync"),
-           "sync_error": d.get("sync_error", ""), "sync_note": d.get("sync_note", "")}
+           "sync_error": d.get("sync_error", ""), "sync_note": d.get("sync_note", ""),
+           "today": _today().isoformat(),
+           "frequencies": ["weekly", "bi-weekly", "monthly"]}
     out.update(_gate(d["chores"]))
     return out
+
 
 @app.post("/chores/add")
 async def chores_add(req: ChoreAdd):
@@ -550,11 +685,14 @@ async def chores_add(req: ChoreAdd):
         d["chores"].append({"id": cid, "name": req.name.strip(), "points": int(req.points),
                             "description": (req.description or "").strip(),
                             "kind": "optional" if req.kind == "optional" else "required",
+                            "frequency": _freq(req.frequency) or DEFAULT_FREQ,
+                            "last_done": None, "posted": True,
                             "done_by": None, "source": "dashboard"})
         d["next_id"] = cid + 1
         _chores_write(d)
-    asyncio.create_task(_sync_chores())      # push it to Cozi promptly
+    asyncio.create_task(_sync_chores())
     return {"status": "ok", "id": cid}
+
 
 @app.post("/chores/edit")
 async def chores_edit(req: ChoreEdit):
@@ -567,8 +705,12 @@ async def chores_edit(req: ChoreEdit):
                 if req.description is not None: c["description"] = req.description.strip()
                 if req.kind is not None:
                     c["kind"] = "optional" if req.kind == "optional" else "required"
+                if req.frequency is not None:
+                    c["frequency"] = _freq(req.frequency) or DEFAULT_FREQ
+        _repost(d)
         _chores_write(d)
     return {"status": "ok"}
+
 
 @app.post("/chores/delete")
 async def chores_delete(req: ChoreId):
@@ -577,6 +719,7 @@ async def chores_delete(req: ChoreId):
         d["chores"] = [c for c in d["chores"] if c["id"] != req.id]
         _chores_write(d)
     return {"status": "ok"}
+
 
 @app.post("/chores/claim")
 async def chores_claim(req: ChoreClaim):
@@ -590,6 +733,11 @@ async def chores_claim(req: ChoreClaim):
             raise HTTPException(status_code=404, detail="chore not found")
         if target.get("done_by"):
             raise HTTPException(status_code=409, detail="already claimed")
+        if not target.get("posted", True):
+            dd = _due_date(target)
+            raise HTTPException(status_code=425,
+                                detail="Not due yet — back on the board %s"
+                                       % (dd.strftime("%b %-d") if dd else "soon"))
         gate = _gate(d["chores"])
         if target.get("kind", "required") == "optional" and not gate["optional_unlocked"]:
             raise HTTPException(status_code=423,
@@ -600,6 +748,7 @@ async def chores_claim(req: ChoreClaim):
                               "points": int(target.get("points", 0))})
         _chores_write(d)
     return {"status": "ok"}
+
 
 @app.post("/chores/unclaim")
 async def chores_unclaim(req: ChoreId):
@@ -613,6 +762,7 @@ async def chores_unclaim(req: ChoreId):
         _chores_write(d)
     return {"status": "ok"}
 
+
 @app.post("/chores/target")
 async def chores_target(req: ChoreTarget):
     async with _chores_lock:
@@ -620,6 +770,7 @@ async def chores_target(req: ChoreTarget):
         d["target"] = int(req.target)
         _chores_write(d)
     return {"status": "ok"}
+
 
 @app.post("/chores/sheeturl")
 async def chores_sheeturl(req: SheetUrl):
@@ -629,17 +780,21 @@ async def chores_sheeturl(req: SheetUrl):
         _chores_write(d)
     return await _sync_chores()
 
+
 @app.post("/chores/sync")
 async def chores_sync():
     return await _sync_chores()
+
+
+@app.get("/chores/history")
+async def chores_history():
+    return {"history": _chores_read().get("history", [])}
+
 
 @app.post("/chores/newweek")
 async def chores_newweek():
     async with _chores_lock:
         d = _chores_read()
-        d["log"] = {"ian": [], "evan": []}
-        for c in d["chores"]:
-            c["done_by"] = None
-        d["week_start"] = datetime.date.today().isoformat()
+        n = _roll_week(d)
         _chores_write(d)
-    return {"status": "ok"}
+    return {"status": "ok", "stamped": n, "week_start": d.get("week_start")}
