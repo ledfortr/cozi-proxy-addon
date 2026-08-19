@@ -374,30 +374,61 @@ async def _from_sheet(url):
         return out, "sheet fetch failed: %s" % str(ex)[:80]
 
     try:
+        body = body.lstrip("﻿")                     # Google prepends a BOM
         rows = list(csv.DictReader(io.StringIO(body)))
     except Exception as ex:
         return out, "sheet parse failed: %s" % str(ex)[:80]
+    if not rows:
+        return out, ""
 
-    def col(row, *names):
-        for k, v in row.items():
-            if (k or "").strip().lower() in names:
-                return (v or "").strip()
-        return ""
+    cols = _map_columns(rows[0].keys())
+    if "name" not in cols:
+        return out, "sheet: no chore-name column found"
+
+    def val(row, field):
+        return (row.get(cols[field]) or "").strip() if field in cols else ""
 
     for row in rows:
-        name = col(row, "chore", "name", "task", "job")
+        name = val(row, "name")
         if not name:
             continue
         try:
-            pts = int(float(col(row, "points", "ledpoints", "pts") or 0))
+            pts = int(float(val(row, "points") or 0))
         except ValueError:
             pts = 0
-        kind = col(row, "type", "kind", "required").lower()
-        kind = "optional" if kind.startswith("o") else "required"
+        kind = "optional" if val(row, "kind").lower().startswith("o") else "required"
         out[_norm(name)] = {"name": name, "points": pts,
-                            "description": col(row, "description", "details", "how", "notes"),
+                            "description": val(row, "description"),
                             "kind": kind, "source": "sheet"}
     return out, ""
+
+
+def _map_columns(fieldnames):
+    """Map whatever the family typed as headers onto our four fields.
+
+    Real headers in use are things like "Chore Title", "Chore Steps/Details" and
+    "Type (Required / Optional)", so match on substrings rather than exact names.
+    Order matters: "chore" appears in BOTH the title and the steps column, so the
+    more specific patterns get to claim their column first.
+    """
+    heads = [h for h in fieldnames if h]
+    cols, taken = {}, set()
+
+    def claim(field, *needles):
+        for h in heads:
+            if h in taken:
+                continue
+            lh = h.strip().lower()
+            if any(n in lh for n in needles):
+                cols[field] = h
+                taken.add(h)
+                return
+
+    claim("description", "detail", "step", "descri", "how", "note", "instruction")
+    claim("points", "point", "pts", "value", "worth")
+    claim("kind", "type", "kind", "required", "optional", "categ")
+    claim("name", "chore", "task", "job", "title", "name")
+    return cols
 
 
 async def _sync_chores():
