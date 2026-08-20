@@ -588,11 +588,11 @@ async def _do_sync():
     # Cozi wins on the text fields (it's the shared list the family edits), but the
     # sheet keeps ownership of frequency since Cozi can't express one.
     sheet_ok = bool(sheet_items) and not sheet_err
-    ext = dict(sheet_items)
-    for k, v in cozi_items.items():
-        if k in ext:
-            v = dict(v)
-            v["frequency"] = ext[k].get("frequency")
+    # Cozi first, then let the sheet overwrite. Cozi can't express a frequency and
+    # its required/optional is just which list an item sits in, so for anything the
+    # sheet lists the sheet's points/type/frequency/description are the truth.
+    ext = dict(cozi_items)
+    for k, v in sheet_items.items():
         ext[k] = v
 
     push = []
@@ -634,6 +634,19 @@ async def _do_sync():
                     c["from_sheet"] = True
                 d["schema"] = 2
 
+        move_in_cozi = []
+        if sheet_ok:
+            for key, e in sheet_items.items():
+                if key not in cozi_item_ids:
+                    continue
+                cur_list, item_id = cozi_item_ids[key]
+                want_list = list_ids.get(e.get("kind", "required"))
+                if want_list and cur_list != want_list:
+                    move_in_cozi.append((cur_list, item_id, want_list,
+                                         _fmt_item({"name": e["name"],
+                                                    "points": e["points"],
+                                                    "description": e["description"]})))
+
         drop_from_cozi = []
         if not cozi_err:
             keep = []
@@ -672,13 +685,19 @@ async def _do_sync():
             await cozi_client.remove_items(list_id, [item_id])
         except Exception:
             pass
+    for old_list, item_id, new_list, text in move_in_cozi:
+        try:
+            await cozi_client.remove_items(old_list, [item_id])
+            await cozi_client.add_item(new_list, text, 0)
+        except Exception:
+            pass
     for list_id, text in push:
         try:
             await cozi_client.add_item(list_id, text, 0)
         except Exception:
             pass
     return {"cozi": len(cozi_items), "sheet": len(sheet_items), "pushed": len(push),
-            "removed": len(drop_from_cozi), "rolled": rolled,
+            "removed": len(drop_from_cozi), "moved": len(move_in_cozi), "rolled": rolled,
             "error": cozi_err or sheet_err or ""}
 
 
