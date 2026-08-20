@@ -322,7 +322,7 @@ def _parse_date(s):
 def _chores_default():
     return {"target": 100, "chores": [], "log": {"ian": [], "evan": []}, "week_start": None,
             "next_id": 1, "sheet_url": "", "last_sync": None, "sync_error": "", "sync_note": "",
-            "history": []}
+            "history": [], "rejections": [], "schema": 0}
 
 
 def _chores_read():
@@ -341,6 +341,7 @@ def _chores_read():
             c.setdefault("frequency", DEFAULT_FREQ)
             c.setdefault("last_done", None)
             c.setdefault("posted", True)
+            c.setdefault("from_sheet", False)
         return base
     except Exception:
         return _chores_default()
@@ -472,9 +473,9 @@ async def _from_cozi():
     """{norm_name: chore-ish} from the two Cozi lists, plus the list ids we found.
     Cozi item text can't carry a frequency, so those entries leave it as None and
     the reconcile step keeps whatever the sheet (or an earlier add) already set."""
-    out, list_ids = {}, {}
+    out, list_ids, item_ids = {}, {}, {}
     if not cozi_client or not logged_in:
-        return out, list_ids, "Cozi not connected"
+        return out, list_ids, item_ids, "Cozi not connected"
     lists = await cozi_client.get_lists()
     for l in (lists or []):
         kind = COZI_LISTS.get((l.get("title") or "").strip().lower())
@@ -487,9 +488,11 @@ async def _from_cozi():
             name, pts, desc = _parse_item(it.get("text"))
             if not name:
                 continue
-            out[_norm(name)] = {"name": name, "points": pts, "description": desc,
-                                "kind": kind, "source": "cozi", "frequency": None}
-    return out, list_ids, ""
+            key = _norm(name)
+            out[key] = {"name": name, "points": pts, "description": desc,
+                        "kind": kind, "source": "cozi", "frequency": None}
+            item_ids[key] = (list_ids[kind], it.get("itemId") or it.get("item_id"))
+    return out, list_ids, item_ids, ""
 
 
 async def _from_sheet(url):
@@ -578,12 +581,13 @@ async def _sync_chores():
 
 async def _do_sync():
     """Reconcile local chores with Cozi + sheet. Never drops a claimed chore."""
-    cozi_items, list_ids, cozi_err = await _from_cozi()
+    cozi_items, list_ids, cozi_item_ids, cozi_err = await _from_cozi()
     d0 = _chores_read()
     sheet_items, sheet_err = await _from_sheet(d0.get("sheet_url") or "")
 
     # Cozi wins on the text fields (it's the shared list the family edits), but the
     # sheet keeps ownership of frequency since Cozi can't express one.
+    sheet_ok = bool(sheet_items) and not sheet_err
     ext = dict(sheet_items)
     for k, v in cozi_items.items():
         if k in ext:
@@ -606,6 +610,8 @@ async def _do_sync():
                           "kind": e["kind"]})
                 if e.get("frequency"):
                     c["frequency"] = e["frequency"]
+                if key in sheet_items:
+                    c["from_sheet"] = True
                 if c.get("source") == "dashboard":
                     c["source"] = e["source"]
             else:
@@ -615,15 +621,31 @@ async def _do_sync():
                       "description": e["description"], "kind": e["kind"],
                       "frequency": e.get("frequency") or DEFAULT_FREQ,
                       "last_done": None, "posted": True,
+                      "from_sheet": key in sheet_items,
                       "done_by": None, "source": e["source"]}
                 d["chores"].append(nc)
                 local[key] = nc
 
+        # One-time: everything currently held originated from the seeded catalog that
+        # the spreadsheet now mirrors, so hand ownership of it to the sheet.
+        if d.get("schema", 0) < 2:
+            if sheet_ok:
+                for c in d["chores"]:
+                    c["from_sheet"] = True
+                d["schema"] = 2
+
+        drop_from_cozi = []
         if not cozi_err:
             keep = []
             for c in d["chores"]:
-                gone = c.get("source") in ("cozi", "sheet") and _norm(c["name"]) not in ext
-                if gone and not c.get("done_by"):
+                key = _norm(c["name"])
+                # a chore the sheet introduced and has since dropped (a rename counts)
+                # goes away even though Cozi still mirrors the old name
+                sheet_dropped = sheet_ok and c.get("from_sheet") and key not in sheet_items
+                gone = c.get("source") in ("cozi", "sheet") and key not in ext
+                if (gone or sheet_dropped) and not c.get("done_by"):
+                    if key in cozi_item_ids:
+                        drop_from_cozi.append(cozi_item_ids[key])
                     continue
                 keep.append(c)
             d["chores"] = keep
@@ -645,13 +667,19 @@ async def _do_sync():
         d["sync_note"] = "cozi:%d sheet:%d" % (len(cozi_items), len(sheet_items))
         _chores_write(d)
 
+    for list_id, item_id in drop_from_cozi:
+        try:
+            await cozi_client.remove_items(list_id, [item_id])
+        except Exception:
+            pass
     for list_id, text in push:
         try:
             await cozi_client.add_item(list_id, text, 0)
         except Exception:
             pass
     return {"cozi": len(cozi_items), "sheet": len(sheet_items), "pushed": len(push),
-            "rolled": rolled, "error": cozi_err or sheet_err or ""}
+            "removed": len(drop_from_cozi), "rolled": rolled,
+            "error": cozi_err or sheet_err or ""}
 
 
 async def _sync_loop():
