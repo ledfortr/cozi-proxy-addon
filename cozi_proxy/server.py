@@ -381,24 +381,42 @@ def _norm(name):
 
 
 _PTS_RE = re.compile(r"\[\s*(\d+)\s*\]")
-_WHO_RE = re.compile(r"^@(\w+)\s*")
+_WHO_RE = re.compile(r"^@([\w]+)\s*")
+_FRQ_RE = re.compile(r"^~([\w-]+)\s*")
+# A line beginning with # is a note for the family, not a chore.
+NOTE_PREFIX = "#"
+COZI_GUIDE = ("# FORMAT:  Chore name [points] @Who ~frequency  then the instructions."
+              "   @Who = Ian/Evan/Dad/Mom (leave off = anyone).  ~frequency = ~weekly /"
+              " ~bi-weekly / ~monthly (leave off = weekly).  Required vs optional is"
+              " whichever list you put it in.   EXAMPLE:  Walk the dog [10] @Ian ~weekly"
+              " A real walk round the block, take a bag, fresh water when you get back.")
 
 
 def _parse_item(text):
-    """`Unload dishwasher [10] @Ian Put everything away`
-       -> (name, 10, 'ian', description).  The @who token is optional."""
+    """`Walk the dog [10] @Ian ~weekly A real walk round the block`
+       -> (name, 10, 'ian', 'weekly', description).
+    Both the @who and ~frequency tokens are optional and may appear in either
+    order, so an item written before this convention still parses."""
     text = (text or "").strip()
     m = _PTS_RE.search(text)
     if not m:
-        return text, 0, "na", ""
+        return text, 0, "na", None, ""
     name = text[:m.start()].strip(" -:–—")
     rest = text[m.end():].lstrip(" -:–—")
-    who = "na"
-    wm = _WHO_RE.match(rest)
-    if wm:
-        who = _person(wm.group(1))
-        rest = rest[wm.end():]
-    return name, int(m.group(1)), who, rest.strip(" -:–—")
+    who, freq = "na", None
+    for _ in range(2):                       # accept @who ~freq or ~freq @who
+        wm = _WHO_RE.match(rest)
+        if wm:
+            who = _person(wm.group(1))
+            rest = rest[wm.end():]
+            continue
+        fm = _FRQ_RE.match(rest)
+        if fm:
+            freq = _freq(fm.group(1))
+            rest = rest[fm.end():]
+            continue
+        break
+    return name, int(m.group(1)), who, freq, rest.strip(" -:–—")
 
 
 COZI_MAX = 250          # Cozi silently truncates list-item text around here
@@ -411,6 +429,9 @@ def _fmt_item(c):
     who = c.get("assigned_to") or "na"
     if who != "na":
         s += " @%s" % PEOPLE_LABEL.get(who, who.title())
+    freq = c.get("frequency") or DEFAULT_FREQ
+    if freq != DEFAULT_FREQ:
+        s += " ~%s" % freq
     desc = (c.get("description") or "").strip()
     if desc:
         room = COZI_MAX - len(s) - 1
@@ -504,9 +525,9 @@ async def _from_cozi():
     """{norm_name: chore-ish} from the two Cozi lists, plus the list ids we found.
     Cozi item text can't carry a frequency, so those entries leave it as None and
     the reconcile step keeps whatever the sheet (or an earlier add) already set."""
-    out, list_ids, item_ids, raw_text = {}, {}, {}, {}
+    out, list_ids, item_ids, raw_text, guides = {}, {}, {}, {}, {}
     if not cozi_client or not logged_in:
-        return out, list_ids, item_ids, raw_text, "Cozi not connected"
+        return out, list_ids, item_ids, raw_text, guides, "Cozi not connected"
     lists = await cozi_client.get_lists()
     for l in (lists or []):
         kind = COZI_LISTS.get((l.get("title") or "").strip().lower())
@@ -516,16 +537,19 @@ async def _from_cozi():
         for it in (l.get("items") or []):
             if it.get("itemType") == "header":
                 continue
-            name, pts, who, desc = _parse_item(it.get("text"))
+            if (it.get("text") or "").lstrip().startswith(NOTE_PREFIX):
+                guides[kind] = True           # the format guide, not a chore
+                continue
+            name, pts, who, freq_tok, desc = _parse_item(it.get("text"))
             if not name:
                 continue
             key = _norm(name)
             out[key] = {"name": name, "points": pts, "description": desc,
-                        "kind": kind, "source": "cozi", "frequency": None,
+                        "kind": kind, "source": "cozi", "frequency": freq_tok,
                         "assigned_to": who}
             item_ids[key] = (list_ids[kind], it.get("itemId") or it.get("item_id"))
             raw_text[key] = (it.get("text") or "").strip()
-    return out, list_ids, item_ids, raw_text, ""
+    return out, list_ids, item_ids, raw_text, guides, ""
 
 
 async def _from_sheet(url):
@@ -616,7 +640,7 @@ async def _sync_chores():
 
 async def _do_sync():
     """Reconcile local chores with Cozi + sheet. Never drops a claimed chore."""
-    cozi_items, list_ids, cozi_item_ids, cozi_raw, cozi_err = await _from_cozi()
+    cozi_items, list_ids, cozi_item_ids, cozi_raw, have_guide, cozi_err = await _from_cozi()
     d0 = _chores_read()
     sheet_items, sheet_err = await _from_sheet(d0.get("sheet_url") or "")
 
@@ -672,6 +696,9 @@ async def _do_sync():
                 d["schema"] = 2
 
         move_in_cozi, edit_in_cozi, add_to_cozi = [], [], []
+        for kind, lid in list_ids.items():
+            if lid and not have_guide.get(kind):
+                add_to_cozi.append((lid, COZI_GUIDE))
         if sheet_ok and list_ids:
             for key, e in sheet_items.items():
                 want_text = _fmt_item({"name": e["name"], "points": e["points"],
