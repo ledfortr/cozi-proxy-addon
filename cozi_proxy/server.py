@@ -419,7 +419,8 @@ def _repost(d, on=None):
     come back only once their frequency interval has elapsed."""
     on = on or _today()
     for c in d["chores"]:
-        c["posted"] = _is_due(c, on)
+        # a chore sent back by a parent stays up until it's redone
+        c["posted"] = True if c.get("rejected") else _is_due(c, on)
 
 
 def _gate(chores):
@@ -448,6 +449,7 @@ def _roll_week(d, on=None):
         d["history"] = d["history"][-52:]          # keep a year
     for c in d["chores"]:
         c["done_by"] = None
+        c.pop("rejected", None)
     d["log"] = {"ian": [], "evan": []}
     d["week_start"] = _monday(on).isoformat()
     _repost(d, on)
@@ -686,6 +688,10 @@ class ChoreClaim(BaseModel):
 class ChoreTarget(BaseModel):
     target: int
 
+class ChoreReject(BaseModel):
+    id: int
+    comment: str = ""
+
 class SheetUrl(BaseModel):
     url: str
 
@@ -779,6 +785,7 @@ async def chores_claim(req: ChoreClaim):
                                 detail="Finish the %d required chore(s) first"
                                        % gate["required_left"])
         target["done_by"] = kid
+        target.pop("rejected", None)          # redone -> clear the parent's note
         d["log"][kid].append({"chore_id": target["id"], "name": target["name"],
                               "points": int(target.get("points", 0))})
         _chores_write(d)
@@ -794,6 +801,48 @@ async def chores_unclaim(req: ChoreId):
                 kid = c["done_by"]
                 c["done_by"] = None
                 d["log"][kid] = [e for e in d["log"].get(kid, []) if e.get("chore_id") != req.id]
+        _chores_write(d)
+    return {"status": "ok"}
+
+
+@app.post("/chores/reject")
+async def chores_reject(req: ChoreReject):
+    """Parent sends a claimed chore back: points come off that kid's total, the
+    chore returns to the board, and the comment rides along so the kid sees why."""
+    async with _chores_lock:
+        d = _chores_read()
+        c = next((x for x in d["chores"] if x["id"] == req.id), None)
+        if not c:
+            raise HTTPException(status_code=404, detail="chore not found")
+        kid = c.get("done_by")
+        if not kid:
+            raise HTTPException(status_code=409, detail="that chore isn't claimed")
+        # drop it from the kid's log -> the points go with it
+        d["log"][kid] = [e for e in d["log"].get(kid, []) if e.get("chore_id") != req.id]
+        c["done_by"] = None
+        c["posted"] = True                      # straight back on the board
+        c["rejected"] = {
+            "kid": kid,
+            "comment": (req.comment or "").strip(),
+            "at": datetime.datetime.now().isoformat(timespec="minutes"),
+        }
+        d.setdefault("rejections", []).append({
+            "chore": c["name"], "kid": kid, "points": int(c.get("points", 0)),
+            "comment": (req.comment or "").strip(),
+            "at": datetime.datetime.now().isoformat(timespec="minutes"),
+        })
+        d["rejections"] = d["rejections"][-100:]
+        _chores_write(d)
+    return {"status": "ok", "kid": kid, "points_removed": int(c.get("points", 0))}
+
+
+@app.post("/chores/clear_rejection")
+async def chores_clear_rejection(req: ChoreId):
+    async with _chores_lock:
+        d = _chores_read()
+        for c in d["chores"]:
+            if c["id"] == req.id:
+                c.pop("rejected", None)
         _chores_write(d)
     return {"status": "ok"}
 
@@ -823,7 +872,8 @@ async def chores_sync():
 
 @app.get("/chores/history")
 async def chores_history():
-    return {"history": _chores_read().get("history", [])}
+    d = _chores_read()
+    return {"history": d.get("history", []), "rejections": d.get("rejections", [])}
 
 
 @app.post("/chores/newweek")
