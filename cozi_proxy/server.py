@@ -473,9 +473,9 @@ async def _from_cozi():
     """{norm_name: chore-ish} from the two Cozi lists, plus the list ids we found.
     Cozi item text can't carry a frequency, so those entries leave it as None and
     the reconcile step keeps whatever the sheet (or an earlier add) already set."""
-    out, list_ids, item_ids = {}, {}, {}
+    out, list_ids, item_ids, raw_text = {}, {}, {}, {}
     if not cozi_client or not logged_in:
-        return out, list_ids, item_ids, "Cozi not connected"
+        return out, list_ids, item_ids, raw_text, "Cozi not connected"
     lists = await cozi_client.get_lists()
     for l in (lists or []):
         kind = COZI_LISTS.get((l.get("title") or "").strip().lower())
@@ -492,7 +492,8 @@ async def _from_cozi():
             out[key] = {"name": name, "points": pts, "description": desc,
                         "kind": kind, "source": "cozi", "frequency": None}
             item_ids[key] = (list_ids[kind], it.get("itemId") or it.get("item_id"))
-    return out, list_ids, item_ids, ""
+            raw_text[key] = (it.get("text") or "").strip()
+    return out, list_ids, item_ids, raw_text, ""
 
 
 async def _from_sheet(url):
@@ -581,7 +582,7 @@ async def _sync_chores():
 
 async def _do_sync():
     """Reconcile local chores with Cozi + sheet. Never drops a claimed chore."""
-    cozi_items, list_ids, cozi_item_ids, cozi_err = await _from_cozi()
+    cozi_items, list_ids, cozi_item_ids, cozi_raw, cozi_err = await _from_cozi()
     d0 = _chores_read()
     sheet_items, sheet_err = await _from_sheet(d0.get("sheet_url") or "")
 
@@ -634,18 +635,22 @@ async def _do_sync():
                     c["from_sheet"] = True
                 d["schema"] = 2
 
-        move_in_cozi = []
-        if sheet_ok:
+        move_in_cozi, edit_in_cozi, add_to_cozi = [], [], []
+        if sheet_ok and list_ids:
             for key, e in sheet_items.items():
+                want_text = _fmt_item({"name": e["name"], "points": e["points"],
+                                       "description": e["description"]})
+                want_list = list_ids.get(e.get("kind", "required"))
+                if not want_list:
+                    continue
                 if key not in cozi_item_ids:
+                    add_to_cozi.append((want_list, want_text))       # new in the sheet
                     continue
                 cur_list, item_id = cozi_item_ids[key]
-                want_list = list_ids.get(e.get("kind", "required"))
-                if want_list and cur_list != want_list:
-                    move_in_cozi.append((cur_list, item_id, want_list,
-                                         _fmt_item({"name": e["name"],
-                                                    "points": e["points"],
-                                                    "description": e["description"]})))
+                if cur_list != want_list:
+                    move_in_cozi.append((cur_list, item_id, want_list, want_text))
+                elif cozi_raw.get(key, "") != want_text:
+                    edit_in_cozi.append((cur_list, item_id, want_text))
 
         drop_from_cozi = []
         if not cozi_err:
@@ -691,13 +696,24 @@ async def _do_sync():
             await cozi_client.add_item(new_list, text, 0)
         except Exception:
             pass
+    for list_id, item_id, text in edit_in_cozi:
+        try:
+            await cozi_client.edit_item(list_id, item_id, text)
+        except Exception:
+            pass
+    for list_id, text in add_to_cozi:
+        try:
+            await cozi_client.add_item(list_id, text, 0)
+        except Exception:
+            pass
     for list_id, text in push:
         try:
             await cozi_client.add_item(list_id, text, 0)
         except Exception:
             pass
     return {"cozi": len(cozi_items), "sheet": len(sheet_items), "pushed": len(push),
-            "removed": len(drop_from_cozi), "moved": len(move_in_cozi), "rolled": rolled,
+            "removed": len(drop_from_cozi), "moved": len(move_in_cozi),
+            "edited": len(edit_in_cozi), "added_to_cozi": len(add_to_cozi), "rolled": rolled,
             "error": cozi_err or sheet_err or ""}
 
 
