@@ -703,7 +703,8 @@ async def _do_sync():
             for key, e in sheet_items.items():
                 want_text = _fmt_item({"name": e["name"], "points": e["points"],
                                        "description": e["description"],
-                                       "assigned_to": e.get("assigned_to", "na")})
+                                       "assigned_to": e.get("assigned_to", "na"),
+                                       "frequency": e.get("frequency") or DEFAULT_FREQ})
                 want_list = list_ids.get(e.get("kind", "required"))
                 if not want_list:
                     continue
