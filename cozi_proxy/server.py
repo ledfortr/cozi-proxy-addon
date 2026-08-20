@@ -288,6 +288,26 @@ FREQ_CANON = {"weekly": "weekly", "bi-weekly": "bi-weekly", "biweekly": "bi-week
               "monthly": "monthly"}
 DEFAULT_FREQ = "weekly"
 
+# Who a chore belongs to. "na" = nobody in particular, anyone can grab it.
+PEOPLE = ["ian", "evan", "dad", "mom", "na"]
+PEOPLE_LABEL = {"ian": "Ian", "evan": "Evan", "dad": "Dad", "mom": "Mom", "na": "NA"}
+
+
+def _person(value):
+    v = re.sub(r"[^a-z]", "", (value or "").lower())
+    if not v:
+        return "na"
+    for p in PEOPLE:
+        if v.startswith(p):
+            return p
+    if v.startswith("ash"):        # Mom by name
+        return "mom"
+    if v.startswith("tom"):        # Dad by name
+        return "dad"
+    if v in ("none", "anyone", "any", "unassigned"):
+        return "na"
+    return "na"
+
 
 def _freq(value):
     v = re.sub(r"[^a-z]", "", (value or "").lower())
@@ -342,6 +362,7 @@ def _chores_read():
             c.setdefault("last_done", None)
             c.setdefault("posted", True)
             c.setdefault("from_sheet", False)
+            c.setdefault("assigned_to", "na")
         return base
     except Exception:
         return _chores_default()
@@ -360,17 +381,24 @@ def _norm(name):
 
 
 _PTS_RE = re.compile(r"\[\s*(\d+)\s*\]")
+_WHO_RE = re.compile(r"^@(\w+)\s*")
 
 
 def _parse_item(text):
-    """`Unload dishwasher [10] Put everything away` -> (name, 10, description)."""
+    """`Unload dishwasher [10] @Ian Put everything away`
+       -> (name, 10, 'ian', description).  The @who token is optional."""
     text = (text or "").strip()
     m = _PTS_RE.search(text)
     if not m:
-        return text, 0, ""
-    return (text[:m.start()].strip(" -:–—"),
-            int(m.group(1)),
-            text[m.end():].strip(" -:–—"))
+        return text, 0, "na", ""
+    name = text[:m.start()].strip(" -:–—")
+    rest = text[m.end():].lstrip(" -:–—")
+    who = "na"
+    wm = _WHO_RE.match(rest)
+    if wm:
+        who = _person(wm.group(1))
+        rest = rest[wm.end():]
+    return name, int(m.group(1)), who, rest.strip(" -:–—")
 
 
 COZI_MAX = 250          # Cozi silently truncates list-item text around here
@@ -380,6 +408,9 @@ def _fmt_item(c):
     """Inverse of _parse_item, for pushing dashboard-added chores into Cozi.
     Trimmed on a word boundary so Cozi's own truncation never cuts mid-word."""
     s = "%s [%d]" % (c["name"], int(c.get("points", 0)))
+    who = c.get("assigned_to") or "na"
+    if who != "na":
+        s += " @%s" % PEOPLE_LABEL.get(who, who.title())
     desc = (c.get("description") or "").strip()
     if desc:
         room = COZI_MAX - len(s) - 1
@@ -485,12 +516,13 @@ async def _from_cozi():
         for it in (l.get("items") or []):
             if it.get("itemType") == "header":
                 continue
-            name, pts, desc = _parse_item(it.get("text"))
+            name, pts, who, desc = _parse_item(it.get("text"))
             if not name:
                 continue
             key = _norm(name)
             out[key] = {"name": name, "points": pts, "description": desc,
-                        "kind": kind, "source": "cozi", "frequency": None}
+                        "kind": kind, "source": "cozi", "frequency": None,
+                        "assigned_to": who}
             item_ids[key] = (list_ids[kind], it.get("itemId") or it.get("item_id"))
             raw_text[key] = (it.get("text") or "").strip()
     return out, list_ids, item_ids, raw_text, ""
@@ -538,7 +570,8 @@ async def _from_sheet(url):
         out[_norm(name)] = {"name": name, "points": pts,
                             "description": val(row, "description"),
                             "kind": kind, "source": "sheet",
-                            "frequency": _freq(val(row, "frequency"))}
+                            "frequency": _freq(val(row, "frequency")),
+                            "assigned_to": _person(val(row, "assigned"))}
     return out, ""
 
 
@@ -563,6 +596,7 @@ def _map_columns(fieldnames):
                 taken.add(h)
                 return
 
+    claim("assigned", "assign", "who", "owner", "person", "whose")
     claim("frequency", "frequen", "how often", "repeat", "cadence", "schedule")
     claim("description", "detail", "step", "descri", "how", "note", "instruction")
     claim("points", "point", "pts", "value", "worth")
@@ -608,7 +642,8 @@ async def _do_sync():
             if c:
                 c.update({"name": e["name"], "points": e["points"],
                           "description": _merge_desc(c.get("description"), e["description"]),
-                          "kind": e["kind"]})
+                          "kind": e["kind"],
+                          "assigned_to": e.get("assigned_to", c.get("assigned_to", "na"))})
                 if e.get("frequency"):
                     c["frequency"] = e["frequency"]
                 if key in sheet_items:
@@ -623,6 +658,7 @@ async def _do_sync():
                       "frequency": e.get("frequency") or DEFAULT_FREQ,
                       "last_done": None, "posted": True,
                       "from_sheet": key in sheet_items,
+                      "assigned_to": e.get("assigned_to", "na"),
                       "done_by": None, "source": e["source"]}
                 d["chores"].append(nc)
                 local[key] = nc
@@ -639,7 +675,8 @@ async def _do_sync():
         if sheet_ok and list_ids:
             for key, e in sheet_items.items():
                 want_text = _fmt_item({"name": e["name"], "points": e["points"],
-                                       "description": e["description"]})
+                                       "description": e["description"],
+                                       "assigned_to": e.get("assigned_to", "na")})
                 want_list = list_ids.get(e.get("kind", "required"))
                 if not want_list:
                     continue
@@ -732,6 +769,7 @@ class ChoreAdd(BaseModel):
     description: str = ""
     kind: str = "required"
     frequency: str = DEFAULT_FREQ
+    assigned_to: str = "na"
 
 class ChoreEdit(BaseModel):
     id: int
@@ -740,6 +778,7 @@ class ChoreEdit(BaseModel):
     description: str | None = None
     kind: str | None = None
     frequency: str | None = None
+    assigned_to: str | None = None
 
 class ChoreId(BaseModel):
     id: int
@@ -777,7 +816,8 @@ async def chores_get():
            "sheet_url": d.get("sheet_url", ""), "last_sync": d.get("last_sync"),
            "sync_error": d.get("sync_error", ""), "sync_note": d.get("sync_note", ""),
            "today": _today().isoformat(),
-           "frequencies": ["weekly", "bi-weekly", "monthly"]}
+           "frequencies": ["weekly", "bi-weekly", "monthly"],
+           "people": PEOPLE, "people_labels": PEOPLE_LABEL}
     out.update(_gate(d["chores"]))
     return out
 
@@ -791,6 +831,7 @@ async def chores_add(req: ChoreAdd):
                             "description": (req.description or "").strip(),
                             "kind": "optional" if req.kind == "optional" else "required",
                             "frequency": _freq(req.frequency) or DEFAULT_FREQ,
+                            "assigned_to": _person(req.assigned_to),
                             "last_done": None, "posted": True,
                             "done_by": None, "source": "dashboard"})
         d["next_id"] = cid + 1
@@ -811,6 +852,8 @@ async def chores_edit(req: ChoreEdit):
                     c["kind"] = "optional" if req.kind == "optional" else "required"
                 if req.frequency is not None:
                     c["frequency"] = _freq(req.frequency) or DEFAULT_FREQ
+                if req.assigned_to is not None:
+                    c["assigned_to"] = _person(req.assigned_to)
         _repost(d)
         _chores_write(d)
     return {"status": "ok"}
