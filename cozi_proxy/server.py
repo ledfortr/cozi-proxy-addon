@@ -1133,7 +1133,8 @@ async def chores_reject(req: ChoreReject):
         # drop it from the kid's log -> the points go with it
         d["log"][kid] = [e for e in d["log"].get(kid, []) if e.get("chore_id") != req.id]
         c["done_by"] = None
-        c["posted"] = True                      # straight back on the board
+        c["posted"] = True
+        c["queued_for"] = kid                   # back into the offender's queue
         c["rejected"] = {
             "kid": kid,
             "comment": (req.comment or "").strip(),
