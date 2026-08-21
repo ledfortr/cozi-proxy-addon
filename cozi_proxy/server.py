@@ -21,10 +21,14 @@ app.add_middleware(
 
 cozi_client: Cozi | None = None
 logged_in = False
+# False = "Google mode": chores run on the local board + Google Sheet only,
+# no Cozi login and no Cozi mirroring. Set via the add-on's cozi_enabled
+# option, or automatically when no Cozi credentials are configured.
+COZI_ENABLED = True
 
 # ====================== IMPROVED AUTO LOGIN WITH BROWSER HEADERS ======================
 async def auto_login():
-    global cozi_client, logged_in
+    global cozi_client, logged_in, COZI_ENABLED
     print("=== Cozi Proxy: Auto-login starting ===")
 
     options_path = "/data/options.json"
@@ -37,8 +41,14 @@ async def auto_login():
         username = options.get("username")
         password = options.get("password")
 
+    if not options.get("cozi_enabled", True):
+        COZI_ENABLED = False
+        print("ℹ️ Cozi integration disabled — running in Google/sheet-only mode.")
+        return
+
     if not username or not password:
-        print("❌ Username or password missing!")
+        COZI_ENABLED = False
+        print("ℹ️ No Cozi credentials configured — running in Google/sheet-only mode.")
         return
 
     print(f"Logging in with username: {username}")
@@ -127,10 +137,13 @@ async def relogin_post():
 # ====================== STATUS ======================
 @app.get("/status")
 async def status():
-    return {
-        "logged_in": logged_in,
-        "message": "Ready - lists should load" if logged_in else "Not logged in - go to /relogin"
-    }
+    if not COZI_ENABLED:
+        msg = "Cozi disabled - chores run on the local board + Google Sheet"
+    elif logged_in:
+        msg = "Ready - lists should load"
+    else:
+        msg = "Not logged in - go to /relogin"
+    return {"logged_in": logged_in, "cozi_enabled": COZI_ENABLED, "message": msg}
 
 # ====================== SERVE YOUR HTML ======================
 @app.get("/", response_class=HTMLResponse)
@@ -545,6 +558,8 @@ async def _from_cozi():
     Cozi item text can't carry a frequency, so those entries leave it as None and
     the reconcile step keeps whatever the sheet (or an earlier add) already set."""
     out, list_ids, item_ids, raw_text, guides = {}, {}, {}, {}, {}
+    if not COZI_ENABLED:
+        return out, list_ids, item_ids, raw_text, guides, ""
     if not cozi_client or not logged_in:
         return out, list_ids, item_ids, raw_text, guides, "Cozi not connected"
     lists = await cozi_client.get_lists()
@@ -864,7 +879,8 @@ async def chores_get():
            "sync_error": d.get("sync_error", ""), "sync_note": d.get("sync_note", ""),
            "today": _today().isoformat(),
            "frequencies": ["daily", "weekly", "bi-weekly", "monthly"],
-           "people": PEOPLE, "people_labels": PEOPLE_LABEL}
+           "people": PEOPLE, "people_labels": PEOPLE_LABEL,
+           "cozi_enabled": COZI_ENABLED}
     out.update(_gate(d["chores"]))
     return out
 

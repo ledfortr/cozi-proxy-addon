@@ -1,5 +1,5 @@
 name: "Cozi Proxy API"
-version: "1.10.0"
+version: "1.11.0"
 slug: "cozi_proxy2"
 description: "Local API bridge for Cozi To-Do lists"
 arch:
@@ -9,15 +9,19 @@ startup: services
 boot: auto
 host_network: true
 
-# User-configurable options (shown in Supervisor UI)
+# User-configurable options (shown in Supervisor UI).
+# cozi_enabled: false (or blank credentials) runs the chores engine in
+# Google/sheet-only mode — no Cozi login, no Cozi list mirroring.
 options:
   username: ""
   password: ""
+  cozi_enabled: true
 
 # Schema for the add-on configuration UI
 schema:
   username: str
   password: str
+  cozi_enabled: bool
 
 # No need for environment variables anymore
 environment: {}
