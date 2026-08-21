@@ -283,9 +283,9 @@ _chores_lock = asyncio.Lock()
 COZI_LISTS = {"chores required": "required", "chores optional": "optional"}
 SYNC_EVERY = 300  # seconds
 
-FREQ_DAYS = {"weekly": 7, "bi-weekly": 14, "biweekly": 14, "monthly": 30}
-FREQ_CANON = {"weekly": "weekly", "bi-weekly": "bi-weekly", "biweekly": "bi-weekly",
-              "monthly": "monthly"}
+FREQ_DAYS = {"daily": 1, "weekly": 7, "bi-weekly": 14, "biweekly": 14, "monthly": 30}
+FREQ_CANON = {"daily": "daily", "weekly": "weekly", "bi-weekly": "bi-weekly",
+              "biweekly": "bi-weekly", "monthly": "monthly"}
 DEFAULT_FREQ = "weekly"
 
 # Who a chore belongs to. "na" = nobody in particular, anyone can grab it.
@@ -311,6 +311,8 @@ def _person(value):
 
 def _freq(value):
     v = re.sub(r"[^a-z]", "", (value or "").lower())
+    if v.startswith("da") or v.startswith("everyday") or v.startswith("eachday"):
+        return "daily"
     if v.startswith("bi") or v.startswith("every2") or v.startswith("fort"):
         return "bi-weekly"
     if v.startswith("mo"):
@@ -386,8 +388,8 @@ _FRQ_RE = re.compile(r"^~([\w-]+)\s*")
 # A line beginning with # is a note for the family, not a chore.
 NOTE_PREFIX = "#"
 COZI_GUIDE = ("# FORMAT:  Chore name [points] @Who ~frequency  then the instructions."
-              "   @Who = Ian/Evan/Dad/Mom (leave off = anyone).  ~frequency = ~weekly /"
-              " ~bi-weekly / ~monthly (leave off = weekly).  Required vs optional is"
+              "   @Who = Ian/Evan/Dad/Mom (leave off = anyone).  ~frequency = ~daily /"
+              " ~weekly / ~bi-weekly / ~monthly (leave off = weekly).  Required vs optional is"
               " whichever list you put it in.   EXAMPLE:  Walk the dog [10] @Ian ~weekly"
               " A real walk round the block, take a bag, fresh water when you get back.")
 
@@ -509,6 +511,23 @@ def _roll_week(d, on=None):
     return len(done)
 
 
+def _roll_daily(d, on=None):
+    """Daily chores reopen every morning; the points already banked stay banked."""
+    on = on or _today()
+    n = 0
+    for c in d["chores"]:
+        if c.get("frequency") != "daily" or not c.get("done_by"):
+            continue
+        done_on = _parse_date(c.get("done_on") or "") or _parse_date(d.get("week_start") or "")
+        if done_on and done_on < on:
+            c["last_done"] = done_on.isoformat()
+            c["done_by"] = None
+            c.pop("rejected", None)
+            c["posted"] = True
+            n += 1
+    return n
+
+
 def _maybe_roll(d):
     """Auto-advance on Monday; catches up if the box was off."""
     today = _today()
@@ -517,7 +536,7 @@ def _maybe_roll(d):
     if ws is None or ws < this_monday:
         _roll_week(d, today)
         return True
-    return False
+    return _roll_daily(d) > 0
 
 
 # ---------------------------------------------------------------- sync sources
@@ -844,7 +863,7 @@ async def chores_get():
            "sheet_url": d.get("sheet_url", ""), "last_sync": d.get("last_sync"),
            "sync_error": d.get("sync_error", ""), "sync_note": d.get("sync_note", ""),
            "today": _today().isoformat(),
-           "frequencies": ["weekly", "bi-weekly", "monthly"],
+           "frequencies": ["daily", "weekly", "bi-weekly", "monthly"],
            "people": PEOPLE, "people_labels": PEOPLE_LABEL}
     out.update(_gate(d["chores"]))
     return out
@@ -919,6 +938,7 @@ async def chores_claim(req: ChoreClaim):
                                 detail="Finish the %d required chore(s) first"
                                        % gate["required_left"])
         target["done_by"] = kid
+        target["done_on"] = _today().isoformat()
         target.pop("rejected", None)          # redone -> clear the parent's note
         d["log"][kid].append({"chore_id": target["id"], "name": target["name"],
                               "points": int(target.get("points", 0))})
