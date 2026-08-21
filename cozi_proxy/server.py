@@ -81,6 +81,7 @@ async def auto_login():
 
 @app.on_event("startup")
 async def startup_event():
+    _load_sms_options()
     await auto_login()
     asyncio.create_task(_sync_loop())     # keeps chores reconciled with Cozi + sheet
 
@@ -143,7 +144,10 @@ async def status():
         msg = "Ready - lists should load"
     else:
         msg = "Not logged in - go to /relogin"
-    return {"logged_in": logged_in, "cozi_enabled": COZI_ENABLED, "message": msg}
+    return {"logged_in": logged_in, "cozi_enabled": COZI_ENABLED,
+            "sms_enabled": bool(SMS["user"] and SMS["pw"]),
+            "sms_phones": [p for p, n in SMS["phones"].items() if n],
+            "message": msg}
 
 # ====================== SERVE YOUR HTML ======================
 @app.get("/", response_class=HTMLResponse)
@@ -304,6 +308,79 @@ DEFAULT_FREQ = "weekly"
 # Who a chore belongs to. "na" = nobody in particular, anyone can grab it.
 PEOPLE = ["ian", "evan", "dad", "mom", "na"]
 PEOPLE_LABEL = {"ian": "Ian", "evan": "Evan", "dad": "Dad", "mom": "Mom", "na": "NA"}
+
+# ====================== SMS (carrier email-to-text) ======================
+# Texts are plain emails to <number>@<carrier gateway> sent through Gmail
+# with an app password. All values come from the add-on options; leaving
+# smtp_user/smtp_pass blank disables texting without breaking anything.
+import smtplib
+from email.mime.text import MIMEText
+
+SMS = {"user": "", "pw": "", "gateway": "vtext.com", "tz": "America/New_York",
+       "phones": {}}
+
+
+def _load_sms_options():
+    try:
+        with open("/data/options.json") as f:
+            o = json.load(f)
+    except Exception:
+        return
+    SMS["user"] = (o.get("smtp_user") or "").strip()
+    SMS["pw"] = (o.get("smtp_pass") or "").strip()
+    SMS["gateway"] = (o.get("sms_gateway") or "").strip() or "vtext.com"
+    SMS["tz"] = (o.get("timezone") or "").strip() or "America/New_York"
+    SMS["phones"] = {p: re.sub(r"\D", "", o.get("phone_" + p) or "")
+                     for p in ("ian", "evan", "mom", "dad")}
+    ready = [p for p, n in SMS["phones"].items() if n]
+    if SMS["user"] and SMS["pw"]:
+        print(f"SMS: texting enabled via {SMS['gateway']} for {ready or 'nobody'}")
+    else:
+        print("SMS: texting disabled (no smtp_user/smtp_pass configured)")
+
+
+def _sms_ready(who):
+    return bool(SMS["user"] and SMS["pw"] and SMS["phones"].get(who))
+
+
+def _send_sms_sync(who, body):
+    if not _sms_ready(who):
+        print(f"SMS skipped ({who}): texting not configured")
+        return False
+    addr = "%s@%s" % (SMS["phones"][who], SMS["gateway"])
+    msg = MIMEText(body)
+    msg["From"] = SMS["user"]
+    msg["To"] = addr
+    try:
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=20) as s:
+            s.login(SMS["user"], SMS["pw"])
+            s.sendmail(SMS["user"], [addr], msg.as_string())
+        print(f"SMS sent to {who}: {body[:70]}")
+        return True
+    except Exception as e:
+        print(f"SMS to {who} FAILED: {e}")
+        return False
+
+
+async def _send_sms(who, body):
+    return await asyncio.to_thread(_send_sms_sync, who, body)
+
+
+def _now_local():
+    try:
+        from zoneinfo import ZoneInfo
+        return datetime.datetime.now(ZoneInfo(SMS["tz"]))
+    except Exception:
+        return datetime.datetime.now()
+
+
+def _stamp(dt):
+    """'9:59am August 21st' — the format the completion texts use."""
+    h = dt.hour % 12 or 12
+    ampm = "am" if dt.hour < 12 else "pm"
+    day = dt.day
+    suf = "th" if 11 <= day <= 13 else {1: "st", 2: "nd", 3: "rd"}.get(day % 10, "th")
+    return "%d:%02d%s %s %d%s" % (h, dt.minute, ampm, dt.strftime("%B"), day, suf)
 
 
 def _person(value):
@@ -931,6 +1008,27 @@ async def chores_delete(req: ChoreId):
     return {"status": "ok"}
 
 
+@app.post("/chores/assign")
+async def chores_assign(req: ChoreClaim):
+    """Parent assigns a chore to a kid and texts them to go do it."""
+    kid = req.kid.lower()
+    if kid not in ("ian", "evan"):
+        raise HTTPException(status_code=400, detail="kid must be ian or evan")
+    async with _chores_lock:
+        d = _chores_read()
+        c = next((x for x in d["chores"] if x["id"] == req.id), None)
+        if not c:
+            raise HTTPException(status_code=404, detail="chore not found")
+        c["assigned_to"] = kid
+        _chores_write(d)
+    body = "You need to do this chore now: " + c["name"]
+    if c.get("description"):
+        body += " — " + c["description"]
+    body += " (%s pts)" % c.get("points", 0)
+    sent = await _send_sms(kid, body)
+    return {"status": "ok", "sms": sent}
+
+
 @app.post("/chores/claim")
 async def chores_claim(req: ChoreClaim):
     kid = req.kid.lower()
@@ -959,6 +1057,11 @@ async def chores_claim(req: ChoreClaim):
         d["log"][kid].append({"chore_id": target["id"], "name": target["name"],
                               "points": int(target.get("points", 0))})
         _chores_write(d)
+    # let Mom know, without holding up the kid's tap
+    kid_label = PEOPLE_LABEL.get(kid, kid.title())
+    asyncio.create_task(_send_sms(
+        "mom", "%s just completed chore [%s] at %s"
+               % (kid_label, target["name"], _stamp(_now_local()))))
     return {"status": "ok"}
 
 
