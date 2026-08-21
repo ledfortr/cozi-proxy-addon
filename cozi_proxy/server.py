@@ -1008,6 +1008,23 @@ async def chores_delete(req: ChoreId):
     return {"status": "ok"}
 
 
+class SmsTest(BaseModel):
+    who: str = "dad"
+
+
+@app.post("/sms/test")
+async def sms_test(req: SmsTest):
+    """Send a test text to one family member (ian/evan/mom/dad)."""
+    who = req.who.lower()
+    if who not in SMS["phones"]:
+        raise HTTPException(status_code=400, detail="who must be ian/evan/mom/dad")
+    sent = await _send_sms(who, "El Dashboardio test text — texting works! (%s)"
+                                % _stamp(_now_local()))
+    return {"sent": sent, "who": who, "gateway": SMS["gateway"],
+            "sms_enabled": bool(SMS["user"] and SMS["pw"]),
+            "phone_set": bool(SMS["phones"].get(who))}
+
+
 @app.post("/chores/assign")
 async def chores_assign(req: ChoreClaim):
     """Parent assigns a chore to a kid and texts them to go do it."""
