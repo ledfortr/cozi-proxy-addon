@@ -455,6 +455,8 @@ def _chores_read():
             c.setdefault("posted", True)
             c.setdefault("from_sheet", False)
             c.setdefault("assigned_to", "na")
+            # kid work queue — LOCAL ONLY, never overwritten by sheet/Cozi sync
+            c.setdefault("queued_for", "na")
         return base
     except Exception:
         return _chores_default()
@@ -595,6 +597,7 @@ def _roll_week(d, on=None):
     for c in d["chores"]:
         c["done_by"] = None
         c.pop("rejected", None)
+        c["queued_for"] = "na"       # queues start fresh each week
     d["log"] = {"ian": [], "evan": []}
     d["week_start"] = _monday(on).isoformat()
     _repost(d, on)
@@ -1008,6 +1011,25 @@ async def chores_delete(req: ChoreId):
     return {"status": "ok"}
 
 
+@app.post("/chores/queue")
+async def chores_queue(req: ChoreClaim):
+    """Kid drops a chore into their own work queue (or 'na' to release it).
+    No SMS, no code — completing it later is what needs the kid's code."""
+    kid = req.kid.lower()
+    if kid not in ("ian", "evan", "na"):
+        raise HTTPException(status_code=400, detail="kid must be ian, evan or na")
+    async with _chores_lock:
+        d = _chores_read()
+        c = next((x for x in d["chores"] if x["id"] == req.id), None)
+        if not c:
+            raise HTTPException(status_code=404, detail="chore not found")
+        if c.get("done_by"):
+            raise HTTPException(status_code=409, detail="already completed")
+        c["queued_for"] = kid
+        _chores_write(d)
+    return {"status": "ok", "queued_for": kid}
+
+
 class SmsTest(BaseModel):
     who: str = "dad"
 
@@ -1037,6 +1059,7 @@ async def chores_assign(req: ChoreClaim):
         if not c:
             raise HTTPException(status_code=404, detail="chore not found")
         c["assigned_to"] = kid
+        c["queued_for"] = kid        # parent assignment lands in the kid's queue
         _chores_write(d)
     body = "You need to do this chore now: " + c["name"]
     if c.get("description"):
