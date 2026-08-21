@@ -469,9 +469,56 @@ def _chores_write(d):
     os.replace(tmp, CHORES_DB)
 
 
+_NORM_ORDINALS = {"1st": "first", "2nd": "second", "3rd": "third", "4th": "fourth",
+                  "5th": "fifth"}
+_NORM_STOPWORDS = {"the", "a", "an"}
+
+
 def _norm(name):
-    """Match key across Cozi / sheet / dashboard: case- and space-insensitive."""
-    return re.sub(r"\s+", " ", (name or "").strip().lower())
+    """Match key across Cozi / sheet / dashboard. Deliberately fuzzy about
+    wording drift ("Mop the 1st floor" == "Mop first floor") but keeps real
+    distinguishing words, so genuinely different chores never collapse."""
+    s = re.sub(r"[^\w\s()/&-]", "", (name or "").strip().lower())
+    words = [_NORM_ORDINALS.get(w, w) for w in s.split()
+             if w not in _NORM_STOPWORDS]
+    return " ".join(words)
+
+
+def _dedupe(d):
+    """Tidy pass: collapse chores whose names differ only in wording drift.
+    Keeps the row with real state (done > queued > sheet-backed > oldest),
+    folds anything the duplicates knew into the keeper."""
+    seen, keep, removed = {}, [], 0
+    for c in d["chores"]:
+        k = _norm(c.get("name"))
+        if k not in seen:
+            seen[k] = c
+            keep.append(c)
+            continue
+        a, b = seen[k], c
+
+        def _rank(x):
+            return (bool(x.get("done_by")), x.get("queued_for", "na") != "na",
+                    bool(x.get("from_sheet")))
+        winner, loser = (a, b) if _rank(a) >= _rank(b) else (b, a)
+        if winner is b:
+            keep[keep.index(a)] = b
+            seen[k] = b
+        if len(loser.get("description") or "") > len(winner.get("description") or ""):
+            winner["description"] = loser["description"]
+        if winner.get("queued_for", "na") == "na":
+            winner["queued_for"] = loser.get("queued_for", "na")
+        if winner.get("assigned_to", "na") == "na":
+            winner["assigned_to"] = loser.get("assigned_to", "na")
+        if not winner.get("rejected") and loser.get("rejected"):
+            winner["rejected"] = loser["rejected"]
+        if loser.get("from_sheet"):
+            winner["from_sheet"] = True
+        removed += 1
+    if removed:
+        d["chores"] = keep
+        print("tidy: merged %d duplicate chore(s)" % removed)
+    return removed
 
 
 _PTS_RE = re.compile(r"\[\s*(\d+)\s*\]")
@@ -622,14 +669,21 @@ def _roll_daily(d, on=None):
 
 
 def _maybe_roll(d):
-    """Auto-advance on Monday; catches up if the box was off."""
+    """Auto-advance on Monday, reopen dailies each morning, and run the
+    duplicate-tidy pass; catches up if the box was off."""
     today = _today()
     this_monday = _monday(today)
     ws = _parse_date(d.get("week_start") or "")
+    changed = False
     if ws is None or ws < this_monday:
         _roll_week(d, today)
-        return True
-    return _roll_daily(d) > 0
+        changed = True
+    elif _roll_daily(d) > 0:
+        changed = True
+    if _dedupe(d):
+        _repost(d, today)
+        changed = True
+    return changed
 
 
 # ---------------------------------------------------------------- sync sources
