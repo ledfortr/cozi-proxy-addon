@@ -1,5 +1,8 @@
 # Changelog
 
+## 1.18.1
+- `POST /keep/newlist` creates an empty Keep list.
+
 ## 1.18.0
 - Google Keep -> Cozi: `POST /keep/login` (email + an oauth_token from
   accounts.google.com/EmbeddedSetup, exchanged for a master token on the box)

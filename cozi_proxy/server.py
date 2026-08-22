@@ -2096,6 +2096,34 @@ async def keep_sync_now():
     return await _keep_once()
 
 
+class KeepNewList(BaseModel):
+    title: str
+
+
+@app.post("/keep/newlist")
+async def keep_newlist(req: KeepNewList):
+    """Create an empty Keep list, so 'add X to my <name> list' has a home."""
+    def _mk():
+        res = _keep_sync_sync()
+        if not res.get("ok"):
+            return res
+        keep = res["keep"]
+        for n in res["lists"]:
+            if (n.title or "").strip().lower() == req.title.strip().lower():
+                return {"ok": True, "existed": True}
+        keep.createList(req.title.strip(), [])
+        keep.sync()
+        return {"ok": True, "existed": False, "state": keep.dump()}
+    out = await asyncio.to_thread(_mk)
+    if not out.get("ok"):
+        raise HTTPException(status_code=400, detail=out.get("reason"))
+    if out.get("state"):
+        d = _keep_read()
+        d["state"] = out["state"]
+        _keep_write(d)
+    return {"status": "ok", "title": req.title, "already_there": out.get("existed")}
+
+
 @app.get("/keep/lists")
 async def keep_lists():
     """What Keep has, and which Cozi list each one would land on."""
