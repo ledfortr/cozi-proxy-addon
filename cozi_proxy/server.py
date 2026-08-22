@@ -91,6 +91,7 @@ async def startup_event():
     await auto_login()
     asyncio.create_task(_sync_loop())      # keeps chores reconciled with Cozi + sheet
     asyncio.create_task(_mirror_loop())    # Google Calendar -> Cozi, if configured
+    asyncio.create_task(_keep_loop())      # Google Keep -> Cozi, if configured
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -1501,7 +1502,7 @@ def _voice_cfg():
 
 
 def _voice_aliases():
-    """'mom=Ashley, dad=Tom' — what a person is called out loud vs. the name on
+    """'mom=Jane, dad=John' — what a person is called out loud vs. the name on
     the Cozi household."""
     cfg = _voice_cfg().get("aliases")
     if isinstance(cfg, dict):
@@ -1925,6 +1926,190 @@ async def cozi_calendar(year: int, month: int):
     if not cozi_client or not logged_in:
         raise HTTPException(status_code=503, detail="Cozi not connected")
     return await cozi_client.get_calendar(year, month)
+
+
+# ------------------------------------------------------- Google Keep -> Cozi
+# "Hey Google, add butter to my Kroger list" lands in Google Keep, because Keep
+# is the only notes app Google still talks to. There is no official Keep API
+# for personal accounts, so this rides on gkeepapi with a master token the
+# owner mints once. New (unchecked) items on a Keep list are copied into the
+# Cozi list with the matching name and then ticked off in Keep, so the tick is
+# the "already synced" marker and nothing arrives twice.
+
+KEEP_DB = "/data/keep.json"
+KEEP = {"every": 60, "err": "", "last": "", "count": 0}
+
+
+def _keep_read():
+    try:
+        with open(KEEP_DB) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _keep_write(d):
+    with open(KEEP_DB, "w") as f:
+        json.dump(d, f)
+    try:
+        os.chmod(KEEP_DB, 0o600)          # it holds an account token
+    except Exception:
+        pass
+
+
+def _android_id(d):
+    if not d.get("android_id"):
+        import random
+        d["android_id"] = "%016x" % random.getrandbits(64)
+    return d["android_id"]
+
+
+def _keep_sync_sync():
+    """Blocking half of the Keep poll — gkeepapi is synchronous."""
+    d = _keep_read()
+    if not d.get("email") or not d.get("master_token"):
+        return {"ok": False, "reason": "not configured"}
+    import gkeepapi
+    keep = gkeepapi.Keep()
+    state = d.get("state")
+    ok = False
+    for attempt in ("authenticate", "resume"):
+        fn = getattr(keep, attempt, None)
+        if not fn:
+            continue
+        try:
+            fn(d["email"], d["master_token"], state=state)
+            ok = True
+            break
+        except TypeError:
+            try:
+                fn(d["email"], d["master_token"])
+                ok = True
+                break
+            except Exception as e:
+                last = e
+        except Exception as e:
+            last = e
+    if not ok:
+        return {"ok": False, "reason": "login failed: %s" % last}
+    lists = [n for n in keep.all() if getattr(n, "type", None)
+             and str(n.type).endswith("List")]
+    return {"ok": True, "keep": keep, "lists": lists, "state": keep.dump()}
+
+
+async def _keep_once():
+    if not cozi_client or not logged_in:
+        return {"synced": 0, "reason": "Cozi not connected"}
+    res = await asyncio.to_thread(_keep_sync_sync)
+    if not res.get("ok"):
+        KEEP["err"] = res.get("reason", "")
+        return {"synced": 0, "reason": KEEP["err"]}
+    KEEP["err"] = ""
+    keep, lists = res["keep"], res["lists"]
+    cozi_lists = await cozi_client.get_lists()
+    d = _keep_read()
+    made, touched = 0, []
+    for note in lists:
+        title = (note.title or "").strip()
+        target = _pick_list(title, cozi_lists)
+        if not target:
+            continue
+        for item in list(note.items):
+            if item.checked:
+                continue
+            text = (item.text or "").strip()
+            if not text:
+                continue
+            await cozi_client.add_item(target.get("listId") or target.get("list_id"), text, 0)
+            item.checked = True            # the tick is the synced marker
+            made += 1
+            touched.append("%s -> %s" % (text, target.get("title")))
+            _voice_log({"at": _now_local().isoformat(timespec="seconds"),
+                        "text": text, "source": "keep", "ok": True, "intent": "list",
+                        "speech": "Copied %s from the %s Keep list to %s."
+                                  % (text, title, target.get("title")),
+                        "detail": {"keep_list": title, "cozi_list": target.get("title")}})
+    if made:
+        await asyncio.to_thread(keep.sync)
+    d["state"] = keep.dump()
+    d["last"] = _now_local().isoformat(timespec="seconds")
+    _keep_write(d)
+    KEEP["last"] = d["last"]
+    KEEP["count"] += made
+    return {"synced": made, "items": touched}
+
+
+async def _keep_loop():
+    while True:
+        try:
+            if _keep_read().get("master_token"):
+                await _keep_once()
+        except Exception as e:
+            KEEP["err"] = str(e)
+            print("Keep sync: %s" % e)
+        await asyncio.sleep(KEEP["every"])
+
+
+class KeepLogin(BaseModel):
+    email: str
+    oauth_token: str | None = None     # from accounts.google.com/EmbeddedSetup
+    master_token: str | None = None    # if you already minted one
+
+
+@app.post("/keep/login")
+async def keep_login(req: KeepLogin):
+    """Store Keep credentials. Give an oauth_token and the add-on trades it for
+    a master token itself, so the long-lived secret never leaves this box."""
+    d = _keep_read()
+    d["email"] = req.email.strip()
+    if req.master_token:
+        d["master_token"] = req.master_token.strip()
+    elif req.oauth_token:
+        import gpsoauth
+        aid = _android_id(d)
+        res = await asyncio.to_thread(gpsoauth.exchange_token,
+                                      d["email"], req.oauth_token.strip(), aid)
+        tok = res.get("Token")
+        if not tok:
+            raise HTTPException(status_code=400,
+                                detail="Google refused the oauth_token: %s"
+                                       % (res.get("Error") or res))
+        d["master_token"] = tok
+    else:
+        raise HTTPException(status_code=400, detail="need oauth_token or master_token")
+    d.pop("state", None)
+    _keep_write(d)
+    out = await _keep_once()
+    return {"status": "ok", "email": d["email"], "first_sync": out}
+
+
+@app.get("/keep/status")
+async def keep_status():
+    d = _keep_read()
+    return {"configured": bool(d.get("master_token")), "email": d.get("email", ""),
+            "last_sync": d.get("last", ""), "synced_this_run": KEEP["count"],
+            "error": KEEP["err"]}
+
+
+@app.post("/keep/sync")
+async def keep_sync_now():
+    return await _keep_once()
+
+
+@app.get("/keep/lists")
+async def keep_lists():
+    """What Keep has, and which Cozi list each one would land on."""
+    res = await asyncio.to_thread(_keep_sync_sync)
+    if not res.get("ok"):
+        raise HTTPException(status_code=400, detail=res.get("reason"))
+    cozi_lists = await cozi_client.get_lists() if (cozi_client and logged_in) else []
+    out = []
+    for note in res["lists"]:
+        target = _pick_list((note.title or "").strip(), cozi_lists)
+        out.append({"keep": note.title,
+                    "cozi": (target or {}).get("title"),
+                    "open_items": [i.text for i in note.items if not i.checked]})
+    return {"lists": out}
 
 
 @app.delete("/cozi/calendar/{year}/{month}/{appt_id}")

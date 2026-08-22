@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.18.0
+- Google Keep -> Cozi: `POST /keep/login` (email + an oauth_token from
+  accounts.google.com/EmbeddedSetup, exchanged for a master token on the box)
+  then every 60s new unchecked items on a Keep list are copied into the Cozi
+  list with the matching name and ticked off in Keep. `GET /keep/lists` shows
+  the mapping, `GET /keep/status` the health, `POST /keep/sync` runs it now.
+
 ## 1.17.2
 - `DELETE /cozi/calendar/{year}/{month}/{id}` removes an appointment.
 
