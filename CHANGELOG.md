@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.16.0
+- Voice intents: `POST /voice/intent {text}` understands plain sentences and
+  writes them into Cozi — "add butter to the Kroger list" (alias table maps
+  Aldi to the Kroger list, Lowe's to Home Depot) and "create an appointment
+  for Evan Monday at 7 pm description pick up his laundry" (attendee, date,
+  time, notes). Returns a `speech` string for the front door to read back.
+  `POST /voice/parse` dry-runs a sentence, `GET /voice/log` shows the last 60,
+  `GET /voice/persons` lists the household's Cozi attendee ids.
+
 ## 1.15.0
 - Floorplan layout store: `GET/POST /floorplan` persists the dashboard's
   room + furniture editor layout in `/data/floorplan.json`.
