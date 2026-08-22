@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.16.1
+- `voice_aliases` option ("mom=Jane, dad=John") maps spoken names onto Cozi
+  household members for calendar attendees.
+
 ## 1.16.0
 - Voice intents: `POST /voice/intent {text}` understands plain sentences and
   writes them into Cozi — "add butter to the Kroger list" (alias table maps

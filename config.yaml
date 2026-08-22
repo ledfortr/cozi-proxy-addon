@@ -1,5 +1,5 @@
 name: "Cozi Proxy API"
-version: "1.16.0"
+version: "1.16.1"
 slug: "cozi_proxy2"
 description: "Local API bridge for Cozi To-Do lists"
 arch:
@@ -28,6 +28,10 @@ options:
   phone_mom: ""
   phone_dad: ""
   timezone: "America/New_York"
+  # --- voice intents (optional). Maps what people are *called* out loud to the
+  # names on your Cozi household, for "create an appointment for mom...".
+  # Format: "mom=Jane, dad=John". Leave blank if the spoken names match Cozi.
+  voice_aliases: ""
 
 # Schema for the add-on configuration UI
 schema:
@@ -42,6 +46,7 @@ schema:
   phone_mom: str
   phone_dad: str
   timezone: str
+  voice_aliases: str
 
 # No need for environment variables anymore
 environment: {}

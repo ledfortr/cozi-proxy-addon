@@ -1483,10 +1483,27 @@ async def _cozi_persons(force=False):
     return people
 
 
+def _voice_aliases():
+    """'mom=Ashley, dad=Tom' from the add-on options — what the kids say a
+    parent is called vs. what that person is named in Cozi."""
+    try:
+        with open("/data/options.json") as f:
+            raw = json.load(f).get("voice_aliases") or ""
+    except Exception:
+        raw = ""
+    out = {}
+    for pair in raw.split(","):
+        if "=" in pair:
+            said, real = pair.split("=", 1)
+            out[re.sub(r"[^a-z]", "", said.lower())] = re.sub(r"[^a-z]", "", real.lower())
+    return out
+
+
 def _match_person(word, people):
     w = re.sub(r"[^a-z]", "", (word or "").lower())
     if not w:
         return None
+    w = _voice_aliases().get(w, w)
     for p in people:
         n = re.sub(r"[^a-z]", "", p["name"].lower())
         if n == w or n.startswith(w) or w.startswith(n):
