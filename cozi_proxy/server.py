@@ -1065,6 +1065,30 @@ async def chores_delete(req: ChoreId):
     return {"status": "ok"}
 
 
+# ====================== FLOORPLAN (furniture layout store) ======================
+FLOORPLAN_DB = "/data/floorplan.json"
+
+
+@app.get("/floorplan")
+async def floorplan_get():
+    try:
+        with open(FLOORPLAN_DB) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+class FloorplanBody(BaseModel):
+    floors: dict
+
+
+@app.post("/floorplan")
+async def floorplan_set(req: FloorplanBody):
+    with open(FLOORPLAN_DB, "w") as f:
+        json.dump(req.floors, f)
+    return {"status": "ok"}
+
+
 @app.post("/chores/queue")
 async def chores_queue(req: ChoreClaim):
     """Kid drops a chore into their own work queue (or 'na' to release it).
