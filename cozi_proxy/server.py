@@ -81,9 +81,16 @@ async def auto_login():
 
 @app.on_event("startup")
 async def startup_event():
+    # py-cozi turns on DEBUG logging for everything at import time, which dumps
+    # every list in full on every sync. Quiet it before it fills the log.
+    import logging
+    logging.getLogger("cozi").setLevel(logging.WARNING)
+    logging.getLogger().setLevel(logging.INFO)
     _load_sms_options()
+    _load_mirror_options()
     await auto_login()
-    asyncio.create_task(_sync_loop())     # keeps chores reconciled with Cozi + sheet
+    asyncio.create_task(_sync_loop())      # keeps chores reconciled with Cozi + sheet
+    asyncio.create_task(_mirror_loop())    # Google Calendar -> Cozi, if configured
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -1694,6 +1701,170 @@ async def voice_parse(req: VoiceIntent):
 @app.get("/voice/log")
 async def voice_log():
     return _voice_read()
+
+
+# ------------------------------------------------- Google Calendar -> Cozi
+# Google's own assistant already runs a proper booking dialog ("what's the
+# title?", "what time?") and drops the result on the account's calendar. Home
+# Assistant already reads that calendar, so the cheapest voice front door is to
+# let Google take the sentence and mirror whatever lands into Cozi.
+#
+# First pass only *seeds* — every event already on the calendar is recorded as
+# seen and left alone, so turning this on never backfills months of history
+# into the family's Cozi. Only events that appear afterwards get mirrored.
+
+MIRROR = {"cals": [], "days": 60, "prefix": "", "every": 300}
+SUPERVISOR = "http://supervisor/core/api"
+SUPERVISOR_IP = "http://172.30.32.2/core/api"       # host_network can't resolve the name
+
+
+def _load_mirror_options():
+    try:
+        with open("/data/options.json") as f:
+            o = json.load(f)
+    except Exception:
+        return
+    MIRROR["cals"] = [c.strip() for c in (o.get("mirror_calendars") or "").split(",")
+                      if c.strip()]
+    MIRROR["days"] = int(o.get("mirror_days") or 60)
+    MIRROR["prefix"] = (o.get("mirror_prefix") or "").strip().lower()
+    if MIRROR["cals"]:
+        print("Calendar mirror: watching %s" % ", ".join(MIRROR["cals"]))
+
+
+async def _ha_get(path):
+    token = os.environ.get("SUPERVISOR_TOKEN", "")
+    if not token:
+        raise RuntimeError("no SUPERVISOR_TOKEN — set homeassistant_api: true")
+    headers = {"Authorization": "Bearer " + token}
+    last = None
+    for base in (SUPERVISOR, SUPERVISOR_IP):
+        try:
+            async with aiohttp.ClientSession(headers=headers) as s:
+                async with s.get(base + path, timeout=aiohttp.ClientTimeout(total=20)) as r:
+                    if r.status < 400:
+                        return await r.json()
+                    last = "HTTP %d" % r.status
+        except Exception as e:
+            last = str(e)
+    raise RuntimeError("Home Assistant API unreachable: %s" % last)
+
+
+def _ev_when(part):
+    """HA hands back {'dateTime': '...-04:00'} or {'date': 'YYYY-MM-DD'} for
+    all-day. Already local, so read the wall-clock straight off the string."""
+    if not isinstance(part, dict):
+        part = {"dateTime": str(part)}
+    raw = part.get("dateTime") or part.get("date") or ""
+    day = raw[:10]
+    hhmm = raw[11:16] if "T" in raw else None
+    return day, hhmm
+
+
+def _mirror_attendees(summary, people):
+    """'Evan: haircut' or 'haircut for Evan' -> Evan on the Cozi appointment."""
+    m = re.match(r"^\s*([A-Za-z]+)\s*:\s*(.+)$", summary or "")
+    if m:
+        p = _match_person(m.group(1), people)
+        if p:
+            return [p["id"]], p["name"], m.group(2).strip()
+    m = re.search(r"\bfor\s+([A-Za-z]+)\b", summary or "", re.I)
+    if m:
+        p = _match_person(m.group(1), people)
+        if p:
+            return [p["id"]], p["name"], _clean_tail(_cut(summary, m))
+    for p in people:                       # bare name anywhere in the title
+        if re.search(r"\b%s\b" % re.escape(p["name"]), summary or "", re.I):
+            return [p["id"]], p["name"], summary
+    return [], "", summary
+
+
+async def _mirror_once():
+    if not MIRROR["cals"] or not cozi_client or not logged_in:
+        return {"mirrored": 0, "skipped": "not configured"}
+    state = _voice_read()
+    seen = state.setdefault("mirrored", {})
+    seeding = not state.get("mirror_seeded")
+    today = _now_local().date()
+    start = today.isoformat() + "T00:00:00"
+    end = (today + datetime.timedelta(days=MIRROR["days"])).isoformat() + "T00:00:00"
+    people = await _cozi_persons()
+    made = 0
+    for cal in MIRROR["cals"]:
+        try:
+            evs = await _ha_get("/calendars/%s?start=%s&end=%s" % (cal, start, end))
+        except Exception as e:
+            print("Calendar mirror: %s" % e)
+            continue
+        for e in evs or []:
+            summary = (e.get("summary") or "").strip()
+            day, hhmm = _ev_when(e.get("start"))
+            key = "%s|%s|%s|%s" % (cal, day, hhmm or "allday", summary.lower())
+            if key in seen:
+                continue
+            if seeding:
+                seen[key] = "seed"          # pre-existing: remember, don't copy
+                continue
+            if MIRROR["prefix"] and not summary.lower().startswith(MIRROR["prefix"]):
+                seen[key] = "skipped"
+                continue
+            eday, ehhmm = _ev_when(e.get("end"))
+            att, who, subject = _mirror_attendees(summary, people)
+            if MIRROR["prefix"]:
+                subject = subject[len(MIRROR["prefix"]):].strip(" :-") or subject
+            try:
+                y, mo, dd = (int(x) for x in day.split("-"))
+                await cozi_client.add_appointment(
+                    y, mo, dd, hhmm or "00:00",
+                    (ehhmm or _plus_hour(hhmm)) if hhmm else "00:00",
+                    0 if hhmm else 1, att, (e.get("location") or ""),
+                    (e.get("description") or ""), subject or "Appointment")
+            except Exception as ex:
+                print("Calendar mirror: could not copy %r (%s)" % (summary, ex))
+                continue
+            seen[key] = _now_local().isoformat(timespec="seconds")
+            made += 1
+            _voice_log({"at": _now_local().isoformat(timespec="seconds"),
+                        "text": summary, "source": "gcal", "ok": True,
+                        "intent": "calendar",
+                        "speech": "Copied %s to Cozi for %s%s."
+                                  % (subject, day, (" (" + who + ")") if who else ""),
+                        "detail": {"calendar": cal, "date": day, "start": hhmm}})
+            state = _voice_read()           # _voice_log rewrote the file
+            seen = state.setdefault("mirrored", {})
+            seen[key] = _now_local().isoformat(timespec="seconds")
+    if len(seen) > 800:                     # keep the ledger from growing forever
+        for k in list(seen)[:len(seen) - 800]:
+            seen.pop(k, None)
+    state["mirror_seeded"] = True
+    _voice_write(state)
+    if seeding:
+        print("Calendar mirror: seeded %d existing events (none copied)" % len(seen))
+    return {"mirrored": made, "seeded": seeding, "watching": MIRROR["cals"]}
+
+
+async def _mirror_loop():
+    while True:
+        try:
+            if MIRROR["cals"]:
+                await _mirror_once()
+        except Exception as e:
+            print("Calendar mirror loop: %s" % e)
+        await asyncio.sleep(MIRROR["every"])
+
+
+@app.post("/voice/mirror")
+async def voice_mirror_now():
+    """Run the Google-Calendar sweep immediately."""
+    return await _mirror_once()
+
+
+@app.get("/voice/mirror")
+async def voice_mirror_status():
+    state = _voice_read()
+    return {"watching": MIRROR["cals"], "days": MIRROR["days"],
+            "prefix": MIRROR["prefix"], "seeded": bool(state.get("mirror_seeded")),
+            "known_events": len(state.get("mirrored", {}))}
 
 
 @app.get("/cozi/calendar/{year}/{month}")

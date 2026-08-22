@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.17.0
+- Google Calendar mirror: `mirror_calendars` copies newly-added events from
+  Home Assistant calendar entities into Cozi (attendee picked up from an
+  "Evan:" prefix or a name in the title, description carried into the notes).
+  The first pass only records existing events, so nothing backfills; optional
+  `mirror_prefix` limits it to titles starting with a keyword. `POST
+  /voice/mirror` runs a sweep on demand, `GET /voice/mirror` shows status.
+- Quieted py-cozi's DEBUG logging, which was dumping every list on every sync.
+
 ## 1.16.2
 - `GET /cozi/calendar/{year}/{month}` reads a month of Cozi appointments.
 
