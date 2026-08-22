@@ -1,5 +1,8 @@
 # Changelog
 
+## 1.16.2
+- `GET /cozi/calendar/{year}/{month}` reads a month of Cozi appointments.
+
 ## 1.16.1
 - `voice_aliases` option ("mom=Jane, dad=John") maps spoken names onto Cozi
   household members for calendar attendees.

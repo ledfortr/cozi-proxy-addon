@@ -1696,6 +1696,15 @@ async def voice_log():
     return _voice_read()
 
 
+@app.get("/cozi/calendar/{year}/{month}")
+async def cozi_calendar(year: int, month: int):
+    """A month of Cozi appointments — verification, and the dedupe key for any
+    calendar mirror that feeds /voice/intent."""
+    if not cozi_client or not logged_in:
+        raise HTTPException(status_code=503, detail="Cozi not connected")
+    return await cozi_client.get_calendar(year, month)
+
+
 @app.get("/voice/persons")
 async def voice_persons():
     """Household members and their Cozi ids — the calendar attendee map."""
