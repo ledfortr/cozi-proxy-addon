@@ -1490,9 +1490,23 @@ async def _cozi_persons(force=False):
     return people
 
 
+def _voice_cfg():
+    """Voice settings live in /data/voice.json so they can be changed over the
+    API; the add-on options are the fallback defaults."""
+    try:
+        with open(VOICE_DB) as f:
+            return json.load(f).get("cfg") or {}
+    except Exception:
+        return {}
+
+
 def _voice_aliases():
-    """'mom=Ashley, dad=Tom' from the add-on options — what the kids say a
-    parent is called vs. what that person is named in Cozi."""
+    """'mom=Ashley, dad=Tom' — what a person is called out loud vs. the name on
+    the Cozi household."""
+    cfg = _voice_cfg().get("aliases")
+    if isinstance(cfg, dict):
+        return {re.sub(r"[^a-z]", "", k.lower()): re.sub(r"[^a-z]", "", str(v).lower())
+                for k, v in cfg.items()}
     try:
         with open("/data/options.json") as f:
             raw = json.load(f).get("voice_aliases") or ""
@@ -1698,6 +1712,38 @@ async def voice_parse(req: VoiceIntent):
     return {"intent": "unknown", "heard": said}
 
 
+class VoiceConfig(BaseModel):
+    aliases: dict | None = None
+    mirror_calendars: list | None = None
+    mirror_days: int | None = None
+    mirror_prefix: str | None = None
+    reseed: bool = False
+
+
+@app.post("/voice/config")
+async def voice_config_set(req: VoiceConfig):
+    """Change voice settings without touching the add-on's option store."""
+    d = _voice_read()
+    cfg = d.setdefault("cfg", {})
+    for k in ("aliases", "mirror_calendars", "mirror_days", "mirror_prefix"):
+        v = getattr(req, k)
+        if v is not None:
+            cfg[k] = v
+    if req.reseed:
+        d["mirrored"] = {}
+        d["mirror_seeded"] = False       # next sweep re-reads without copying
+    _voice_write(d)
+    _load_mirror_options()
+    return {"status": "ok", "cfg": cfg, "watching": MIRROR["cals"]}
+
+
+@app.get("/voice/config")
+async def voice_config_get():
+    return {"cfg": _voice_cfg(), "aliases_in_effect": _voice_aliases(),
+            "watching": MIRROR["cals"], "days": MIRROR["days"],
+            "prefix": MIRROR["prefix"]}
+
+
 @app.get("/voice/log")
 async def voice_log():
     return _voice_read()
@@ -1724,10 +1770,15 @@ def _load_mirror_options():
             o = json.load(f)
     except Exception:
         return
-    MIRROR["cals"] = [c.strip() for c in (o.get("mirror_calendars") or "").split(",")
-                      if c.strip()]
-    MIRROR["days"] = int(o.get("mirror_days") or 60)
-    MIRROR["prefix"] = (o.get("mirror_prefix") or "").strip().lower()
+    cfg = _voice_cfg()
+    cals = cfg.get("mirror_calendars")
+    if cals is None:
+        cals = [c.strip() for c in (o.get("mirror_calendars") or "").split(",") if c.strip()]
+    MIRROR["cals"] = [c for c in cals if c]
+    MIRROR["days"] = int(cfg.get("mirror_days") or o.get("mirror_days") or 60)
+    MIRROR["prefix"] = str(cfg.get("mirror_prefix")
+                           if cfg.get("mirror_prefix") is not None
+                           else (o.get("mirror_prefix") or "")).strip().lower()
     if MIRROR["cals"]:
         print("Calendar mirror: watching %s" % ", ".join(MIRROR["cals"]))
 

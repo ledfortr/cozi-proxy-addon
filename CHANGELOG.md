@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.17.1
+- `POST /voice/config` sets the spoken-name aliases and the mirror settings
+  at runtime (stored in /data/voice.json, overriding the add-on options).
+
 ## 1.17.0
 - Google Calendar mirror: `mirror_calendars` copies newly-added events from
   Home Assistant calendar entities into Cozi (attendee picked up from an
