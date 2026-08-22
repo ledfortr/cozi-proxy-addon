@@ -1,5 +1,8 @@
 # Changelog
 
+## 1.17.2
+- `DELETE /cozi/calendar/{year}/{month}/{id}` removes an appointment.
+
 ## 1.17.1
 - `POST /voice/config` sets the spoken-name aliases and the mirror settings
   at runtime (stored in /data/voice.json, overriding the add-on options).

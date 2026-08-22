@@ -1927,6 +1927,14 @@ async def cozi_calendar(year: int, month: int):
     return await cozi_client.get_calendar(year, month)
 
 
+@app.delete("/cozi/calendar/{year}/{month}/{appt_id}")
+async def cozi_calendar_remove(year: int, month: int, appt_id: str):
+    if not cozi_client or not logged_in:
+        raise HTTPException(status_code=503, detail="Cozi not connected")
+    await cozi_client.remove_appointment(year, month, appt_id)
+    return {"status": "ok", "removed": appt_id}
+
+
 @app.get("/voice/persons")
 async def voice_persons():
     """Household members and their Cozi ids — the calendar attendee map."""
