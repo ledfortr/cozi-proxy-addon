@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.20.0
+- `POST /sms/send` (to, body, optional gateway) texts arbitrary text to any
+  10-digit number — or to ian/evan/mom/dad by name — through the same carrier
+  email gateway the chore texts use. Lets scripts and scheduled jobs on the LAN
+  send a text without holding the Gmail app password themselves.
+
 ## 1.19.0
 - `POST /chores/adhoc` (name, description, points, kid) drops a one-off chore
   straight into a kid's queue and texts them a custom heads-up. Frequency

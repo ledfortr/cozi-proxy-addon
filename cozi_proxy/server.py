@@ -352,11 +352,8 @@ def _sms_ready(who):
     return bool(SMS["user"] and SMS["pw"] and SMS["phones"].get(who))
 
 
-def _send_sms_sync(who, body):
-    if not _sms_ready(who):
-        print(f"SMS skipped ({who}): texting not configured")
-        return False
-    addr = "%s@%s" % (SMS["phones"][who], SMS["gateway"])
+def _smtp_text(addr, body, label):
+    """One text out through Gmail. Returns True when the SMTP handoff worked."""
     msg = MIMEText(body)
     msg["From"] = SMS["user"]
     msg["To"] = addr
@@ -364,15 +361,51 @@ def _send_sms_sync(who, body):
         with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=20) as s:
             s.login(SMS["user"], SMS["pw"])
             s.sendmail(SMS["user"], [addr], msg.as_string())
-        print(f"SMS sent to {who}: {body[:70]}")
+        print(f"SMS sent to {label}: {body[:70]}")
         return True
     except Exception as e:
-        print(f"SMS to {who} FAILED: {e}")
+        print(f"SMS to {label} FAILED: {e}")
         return False
+
+
+def _send_sms_sync(who, body):
+    if not _sms_ready(who):
+        print(f"SMS skipped ({who}): texting not configured")
+        return False
+    return _smtp_text("%s@%s" % (SMS["phones"][who], SMS["gateway"]), body, who)
 
 
 async def _send_sms(who, body):
     return await asyncio.to_thread(_send_sms_sync, who, body)
+
+
+def _sms_number(value):
+    """'(513) 417-7196', '15134177196' -> '5134177196'. None if it isn't a
+    10-digit US number. A name (ian/evan/mom/dad) resolves to that phone."""
+    v = (value or "").strip().lower()
+    if v in SMS["phones"]:
+        v = SMS["phones"][v]
+    n = re.sub(r"\D", "", v or "")
+    if len(n) == 11 and n.startswith("1"):
+        n = n[1:]
+    return n if len(n) == 10 else None
+
+
+def _send_sms_raw_sync(number, body, gateway=None):
+    """Text any number, not just the four family phones."""
+    if not (SMS["user"] and SMS["pw"]):
+        print("SMS skipped: texting not configured")
+        return False
+    num = _sms_number(number)
+    if not num:
+        print(f"SMS skipped: {number!r} is not a 10-digit number")
+        return False
+    gw = (gateway or "").strip() or SMS["gateway"]
+    return _smtp_text("%s@%s" % (num, gw), body, num)
+
+
+async def _send_sms_raw(number, body, gateway=None):
+    return await asyncio.to_thread(_send_sms_raw_sync, number, body, gateway)
 
 
 def _now_local():
@@ -1168,6 +1201,34 @@ async def sms_test(req: SmsTest):
     return {"sent": sent, "who": who, "gateway": SMS["gateway"],
             "sms_enabled": bool(SMS["user"] and SMS["pw"]),
             "phone_set": bool(SMS["phones"].get(who))}
+
+
+class SmsSend(BaseModel):
+    to: str                       # 10-digit number, or ian/evan/mom/dad
+    body: str
+    gateway: str | None = None    # override vtext.com for one send
+
+
+@app.post("/sms/send")
+async def sms_send(req: SmsSend):
+    """Send arbitrary text to any number through the carrier email gateway.
+
+    This is the generic hook anything on the LAN can POST to (reminders,
+    scheduled alerts, scripts) instead of holding the Gmail app password."""
+    if not (SMS["user"] and SMS["pw"]):
+        raise HTTPException(status_code=503, detail="texting not configured")
+    num = _sms_number(req.to)
+    if not num:
+        raise HTTPException(status_code=400,
+                            detail="to must be a 10-digit number or ian/evan/mom/dad")
+    body = (req.body or "").strip()
+    if not body:
+        raise HTTPException(status_code=400, detail="body is empty")
+    sent = await _send_sms_raw(num, body, req.gateway)
+    if not sent:
+        raise HTTPException(status_code=502, detail="SMTP send failed")
+    return {"sent": True, "to": num, "gateway": (req.gateway or SMS["gateway"]),
+            "chars": len(body)}
 
 
 @app.post("/chores/assign")
