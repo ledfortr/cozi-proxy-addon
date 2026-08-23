@@ -2109,6 +2109,11 @@ async def _keep_once():
     made, touched = 0, []
     for note in lists:
         title = (note.title or "").strip()
+        # Only shopping lists sync from Keep. Otherwise Keep-native planning
+        # lists (Spring break, Christmas, …) that happen to share a Cozi name
+        # get dumped in and duplicated. The alias table is the shopping filter.
+        if not LIST_ALIASES.get(re.sub(r"\s+list$", "", title.lower()).strip()):
+            continue
         target = _pick_list(title, cozi_lists)
         if not target:
             continue

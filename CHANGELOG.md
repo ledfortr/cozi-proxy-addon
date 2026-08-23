@@ -6,6 +6,10 @@
   email gateway the chore texts use. Lets scripts and scheduled jobs on the LAN
   send a text without holding the Gmail app password themselves.
 
+## 1.19.1
+- Keep sync now only mirrors shopping lists (Kroger/Costco/Home Depot via the
+  alias table); Keep-native planning lists no longer dump into same-named Cozi lists.
+
 ## 1.19.0
 - `POST /chores/adhoc` (name, description, points, kid) drops a one-off chore
   straight into a kid's queue and texts them a custom heads-up. Frequency
