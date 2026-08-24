@@ -1383,6 +1383,39 @@ async def chores_newweek():
     return {"status": "ok", "stamped": n, "week_start": d.get("week_start")}
 
 
+def _reset_all(d, on=None):
+    """Wipe ALL tracking back to week one: no history, no banked totals, no
+    streaks, empty logs, every chore reopened and available. Unlike _roll_week
+    (which banks the closing week into history), this erases history entirely."""
+    on = on or _today()
+    # completed one-off ad-hoc chores just disappear, same as a weekly roll
+    d["chores"] = [c for c in d["chores"]
+                   if not (c.get("frequency") == "once" and c.get("done_by"))]
+    for c in d["chores"]:
+        c["done_by"] = None
+        c.pop("rejected", None)
+        c["queued_for"] = "na"
+        c["last_done"] = None
+        c["posted"] = True          # everything on the board and claimable
+    d["log"] = {"ian": [], "evan": []}
+    d["history"] = []
+    d["rejections"] = []
+    d["week_start"] = _monday(on).isoformat()
+    return len(d["chores"])
+
+
+@app.post("/chores/reset")
+async def chores_reset():
+    """FULL reset to week one — erases history/totals/streaks/queues/logs and
+    reopens every chore. (Use /chores/newweek for a normal week roll that keeps
+    the history and the Grand Champion running totals.)"""
+    async with _chores_lock:
+        d = _chores_read()
+        n = _reset_all(d)
+        _chores_write(d)
+    return {"status": "ok", "reset": n, "week_start": d.get("week_start")}
+
+
 # ========================================================== voice intents
 # One grammar, many front doors. A Google-Assistant relay, Home Assistant
 # Assist, the dashboard mic and plain curl all POST the same raw sentence to

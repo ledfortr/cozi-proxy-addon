@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.20.2
+- `POST /chores/reset` fully resets tracking to week one — erases history,
+  banked totals, streaks, rejections, per-kid logs and queues, and reopens
+  every chore. Distinct from `/chores/newweek`, which banks the week into
+  history and keeps the Grand Champion running totals.
+
 ## 1.20.1
 - Keep sync now only mirrors shopping lists (Kroger/Costco/Home Depot via the
   alias table); Keep-native planning lists no longer dump into same-named Cozi lists.
