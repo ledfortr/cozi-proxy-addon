@@ -1546,6 +1546,9 @@ class MinesGame(BaseModel):
 
 @app.post("/chores/mines/start")
 async def mines_start(req: MinesStart):
+    # Mines is DEMO-ONLY (played client-side with fake points); real LEDPOINTS
+    # can never be staked on it.
+    raise HTTPException(status_code=403, detail="Mines is demo-only — no real LEDPOINTS.")
     import random
     import time
     kid = req.kid.lower()
@@ -1675,6 +1678,8 @@ def _bj_win_log(d, kid, name, pts):
 
 @app.post("/chores/bj/start")
 async def bj_start(req: BjStart):
+    # Blackjack is DEMO-ONLY (client-side, fake points); no real LEDPOINTS at stake.
+    raise HTTPException(status_code=403, detail="Blackjack is demo-only — no real LEDPOINTS.")
     import time
     kid = req.kid.lower()
     if kid not in ("ian", "evan"):

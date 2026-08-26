@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.20.9
+- Mines and Blackjack are now DEMO-ONLY: their /start endpoints refuse (403) so
+  no real LEDPOINTS can be staked. Real-points play is limited to Slots and the
+  Wheel (both true 75% house). Demo play is client-side and unaffected.
+
 ## 1.20.8
 - Odds tuning to keep the house ahead: Mines is now 7 bombs / 2 gems (payouts
   2.5x, 8x) so a first flip survives only ~22% (~78% house). Blackjack now also
