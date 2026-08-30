@@ -499,6 +499,11 @@ def _chores_read():
             c.setdefault("assigned_to", "na")
             # kid work queue — LOCAL ONLY, never overwritten by sheet/Cozi sync
             c.setdefault("queued_for", "na")
+            # parent sign-off. Chores finished before this feature existed are
+            # grandfathered in as approved so nobody's history empties out.
+            if c.get("done_by") and "approved" not in c:
+                c["approved"] = True
+            c.setdefault("approved", False)
         return base
     except Exception:
         return _chores_default()
@@ -1331,6 +1336,10 @@ async def chores_claim(req: ChoreClaim):
                                        "each required chore unlocks one optional." % lbl)
         target["done_by"] = kid
         target["done_on"] = _today().isoformat()
+        # exact moment the kid marked it done — drives the completed-list stamp
+        target["done_at"] = _now_local().isoformat(timespec="seconds")
+        target["approved"] = False            # waits for a parent to sign off
+        target.pop("approved_at", None)
         target.pop("rejected", None)          # redone -> clear the parent's note
         d["log"][kid].append({"chore_id": target["id"], "name": target["name"],
                               "points": int(target.get("points", 0))})
@@ -1351,6 +1360,9 @@ async def chores_unclaim(req: ChoreId):
             if c["id"] == req.id and c.get("done_by"):
                 kid = c["done_by"]
                 c["done_by"] = None
+                c["approved"] = False
+                c.pop("done_at", None)
+                c.pop("approved_at", None)
                 d["log"][kid] = [e for e in d["log"].get(kid, []) if e.get("chore_id") != req.id]
         _chores_write(d)
     return {"status": "ok"}
@@ -1371,6 +1383,9 @@ async def chores_reject(req: ChoreReject):
         # drop it from the kid's log -> the points go with it
         d["log"][kid] = [e for e in d["log"].get(kid, []) if e.get("chore_id") != req.id]
         c["done_by"] = None
+        c["approved"] = False
+        c.pop("done_at", None)
+        c.pop("approved_at", None)
         c["posted"] = True
         c["queued_for"] = kid                   # back into the offender's queue
         c["queued_by"] = "parent"               # a forced redo stays until it's done
@@ -1388,6 +1403,26 @@ async def chores_reject(req: ChoreReject):
         d["rejections"] = d["rejections"][-100:]
         _chores_write(d)
     return {"status": "ok", "kid": kid, "points_removed": int(c.get("points", 0))}
+
+
+@app.post("/chores/approve")
+async def chores_approve(req: ChoreId):
+    """Parent signs off on a finished chore. The kid already has the points —
+    this just moves it out of 'Awaiting Approval' and into their completed
+    list. Rejecting instead is /chores/reject, which claws the points back."""
+    async with _chores_lock:
+        d = _chores_read()
+        c = next((x for x in d["chores"] if x["id"] == req.id), None)
+        if not c:
+            raise HTTPException(status_code=404, detail="chore not found")
+        if not c.get("done_by"):
+            raise HTTPException(status_code=409, detail="that chore isn't finished yet")
+        if c.get("approved"):
+            return {"status": "ok", "already": True}
+        c["approved"] = True
+        c["approved_at"] = _now_local().isoformat(timespec="seconds")
+        _chores_write(d)
+    return {"status": "ok", "kid": c.get("done_by")}
 
 
 @app.post("/chores/clear_rejection")
