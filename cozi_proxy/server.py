@@ -308,10 +308,11 @@ _chores_lock = asyncio.Lock()
 COZI_LISTS = {"chores required": "required", "chores optional": "optional"}
 SYNC_EVERY = 300  # seconds
 
-FREQ_DAYS = {"daily": 1, "weekly": 7, "bi-weekly": 14, "biweekly": 14, "monthly": 30,
+FREQ_DAYS = {"daily": 1, "2-day": 2, "weekly": 7, "bi-weekly": 14, "biweekly": 14,
+             "monthly": 30,
              "once": 3650}   # one-off (ad-hoc): effectively never reposts once done
-FREQ_CANON = {"daily": "daily", "weekly": "weekly", "bi-weekly": "bi-weekly",
-              "biweekly": "bi-weekly", "monthly": "monthly"}
+FREQ_CANON = {"daily": "daily", "2-day": "2-day", "weekly": "weekly",
+              "bi-weekly": "bi-weekly", "biweekly": "bi-weekly", "monthly": "monthly"}
 DEFAULT_FREQ = "weekly"
 
 # Who a chore belongs to. "na" = nobody in particular, anyone can grab it.
@@ -445,6 +446,11 @@ def _freq(value):
     v = re.sub(r"[^a-z]", "", (value or "").lower())
     if v.startswith("da") or v.startswith("everyday") or v.startswith("eachday"):
         return "daily"
+    # every-other-day. Checked before bi-weekly because "every2days" also
+    # starts with "every2", which bi-weekly would otherwise swallow.
+    if (v.startswith("2day") or v.startswith("twoday") or v.startswith("every2day")
+            or v.startswith("everyotherday") or v.startswith("everysecondday")):
+        return "2-day"
     if v.startswith("bi") or v.startswith("every2") or v.startswith("fort"):
         return "bi-weekly"
     if v.startswith("mo"):
@@ -460,6 +466,17 @@ def _freq_days(f):
 
 def _today():
     return datetime.date.today()
+
+
+ROLL_HOUR = 6      # chores "day" starts at 6am, not midnight
+
+
+def _chore_day(now=None):
+    """The chore board's idea of today. Before 6am it is still yesterday, so a
+    daily chore finished last night doesn't reopen until 6am."""
+    now = now or _now_local()
+    d = now.date()
+    return d if now.hour >= ROLL_HOUR else d - datetime.timedelta(days=1)
 
 
 def _monday(d):
@@ -718,17 +735,27 @@ def _roll_week(d, on=None):
     return len(done)
 
 
+SHORT_CYCLE = ("daily", "2-day")
+
+
 def _roll_daily(d, on=None):
-    """Daily chores reopen every morning; the points already banked stay banked."""
-    on = on or _today()
+    """Short-cycle chores reopen on their own clock rather than waiting for the
+    Monday roll: dailies each morning at ROLL_HOUR, 2-day chores two days after
+    they were finished (finish it Monday -> back on the board Wednesday). The
+    points already banked stay banked."""
+    on = on or _chore_day()
     n = 0
     for c in d["chores"]:
-        if c.get("frequency") != "daily" or not c.get("done_by"):
+        f = (c.get("frequency") or "").lower()
+        if f not in SHORT_CYCLE or not c.get("done_by"):
             continue
         done_on = _parse_date(c.get("done_on") or "") or _parse_date(d.get("week_start") or "")
-        if done_on and done_on < on:
+        if done_on and done_on + datetime.timedelta(days=_freq_days(f)) <= on:
             c["last_done"] = done_on.isoformat()
             c["done_by"] = None
+            c["approved"] = False
+            c.pop("done_at", None)
+            c.pop("approved_at", None)
             c.pop("rejected", None)
             c["posted"] = True
             n += 1
@@ -1107,7 +1134,7 @@ async def chores_get():
            "sheet_url": d.get("sheet_url", ""), "last_sync": d.get("last_sync"),
            "sync_error": d.get("sync_error", ""), "sync_note": d.get("sync_note", ""),
            "today": _today().isoformat(),
-           "frequencies": ["daily", "weekly", "bi-weekly", "monthly"],
+           "frequencies": ["daily", "2-day", "weekly", "bi-weekly", "monthly"],
            "people": PEOPLE, "people_labels": PEOPLE_LABEL,
            "cozi_enabled": COZI_ENABLED}
     out.update(_gate(d["chores"]))
