@@ -427,7 +427,8 @@ def _stamp(dt):
 
 
 def _person(value):
-    v = re.sub(r"[^a-z]", "", (value or "").lower())
+    # keep digits: "2-day" must not collapse to "day" (which read as "daily")
+    v = re.sub(r"[^a-z0-9]", "", (value or "").lower())
     if not v:
         return "na"
     for p in PEOPLE:
