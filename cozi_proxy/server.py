@@ -444,7 +444,8 @@ def _person(value):
 
 
 def _freq(value):
-    v = re.sub(r"[^a-z]", "", (value or "").lower())
+    # keep digits: "2-day" must not collapse to "day", which reads as "daily"
+    v = re.sub(r"[^a-z0-9]", "", (value or "").lower())
     if v.startswith("da") or v.startswith("everyday") or v.startswith("eachday"):
         return "daily"
     # every-other-day. Checked before bi-weekly because "every2days" also
