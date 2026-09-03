@@ -2491,7 +2491,11 @@ async def cozi_calendar(year: int, month: int):
 # the "already synced" marker and nothing arrives twice.
 
 KEEP_DB = "/data/keep.json"
-KEEP = {"every": 60, "err": "", "last": "", "count": 0}
+KEEP = {"every": 60, "err": "", "last": "", "count": 0,
+        # gkeepapi is blocking; without a ceiling a hung call parks the
+        # loop task forever and sync silently stops until the add-on restarts.
+        "timeout": 45, "cycle_timeout": 150,
+        "attempted": "", "timeouts": 0, "failed": 0, "cycles": 0}
 
 
 def _keep_read():
@@ -2554,7 +2558,15 @@ def _keep_sync_sync():
 async def _keep_once():
     if not cozi_client or not logged_in:
         return {"synced": 0, "reason": "Cozi not connected"}
-    res = await asyncio.to_thread(_keep_sync_sync)
+    KEEP["attempted"] = _now_local().isoformat(timespec="seconds")
+    KEEP["cycles"] += 1
+    try:
+        res = await asyncio.wait_for(asyncio.to_thread(_keep_sync_sync),
+                                     timeout=KEEP["timeout"])
+    except asyncio.TimeoutError:
+        KEEP["timeouts"] += 1
+        KEEP["err"] = "Keep read timed out after %ds" % KEEP["timeout"]
+        return {"synced": 0, "reason": KEEP["err"]}
     if not res.get("ok"):
         KEEP["err"] = res.get("reason", "")
         return {"synced": 0, "reason": KEEP["err"]}
@@ -2562,47 +2574,77 @@ async def _keep_once():
     keep, lists = res["keep"], res["lists"]
     cozi_lists = await cozi_client.get_lists()
     d = _keep_read()
-    made, touched = 0, []
-    for note in lists:
-        title = (note.title or "").strip()
-        # Only shopping lists sync from Keep. Otherwise Keep-native planning
-        # lists (Spring break, Christmas, …) that happen to share a Cozi name
-        # get dumped in and duplicated. The alias table is the shopping filter.
-        if not LIST_ALIASES.get(re.sub(r"\s+list$", "", title.lower()).strip()):
-            continue
-        target = _pick_list(title, cozi_lists)
-        if not target:
-            continue
-        for item in list(note.items):
-            if item.checked:
+    made, touched, failed, ticked = 0, [], 0, False
+    try:
+        for note in lists:
+            title = (note.title or "").strip()
+            # Only shopping lists sync from Keep. Otherwise Keep-native planning
+            # lists (Spring break, Christmas, …) that happen to share a Cozi name
+            # get dumped in and duplicated. The alias table is the shopping filter.
+            if not LIST_ALIASES.get(re.sub(r"\s+list$", "", title.lower()).strip()):
                 continue
-            text = (item.text or "").strip()
-            if not text:
+            target = _pick_list(title, cozi_lists)
+            if not target:
                 continue
-            await cozi_client.add_item(target.get("listId") or target.get("list_id"), text, 0)
-            item.checked = True            # the tick is the synced marker
-            made += 1
-            touched.append("%s -> %s" % (text, target.get("title")))
-            _voice_log({"at": _now_local().isoformat(timespec="seconds"),
-                        "text": text, "source": "keep", "ok": True, "intent": "list",
-                        "speech": "Copied %s from the %s Keep list to %s."
-                                  % (text, title, target.get("title")),
-                        "detail": {"keep_list": title, "cozi_list": target.get("title")}})
-    if made:
-        await asyncio.to_thread(keep.sync)
-    d["state"] = keep.dump()
-    d["last"] = _now_local().isoformat(timespec="seconds")
-    _keep_write(d)
-    KEEP["last"] = d["last"]
+            for item in list(note.items):
+                if item.checked:
+                    continue
+                text = (item.text or "").strip()
+                if not text:
+                    continue
+                try:
+                    await cozi_client.add_item(
+                        target.get("listId") or target.get("list_id"), text, 0)
+                except Exception as exc:
+                    # Leave it unchecked so it retries, but keep going: one bad
+                    # item used to abort the whole pass, which stranded the ticks
+                    # for everything already copied and re-copied them next run.
+                    failed += 1
+                    KEEP["err"] = "%s: %s" % (text, exc)
+                    continue
+                item.checked = True            # the tick is the synced marker
+                ticked = True
+                made += 1
+                touched.append("%s -> %s" % (text, target.get("title")))
+                _voice_log({"at": _now_local().isoformat(timespec="seconds"),
+                            "text": text, "source": "keep", "ok": True, "intent": "list",
+                            "speech": "Copied %s from the %s Keep list to %s."
+                                      % (text, title, target.get("title")),
+                            "detail": {"keep_list": title, "cozi_list": target.get("title")}})
+    finally:
+        # Always push the ticks we managed to set and always save local state,
+        # even if the pass blew up part way. Skipping this is what produced the
+        # duplicate copies (Tobacco went to Kroger on two consecutive days).
+        if ticked:
+            try:
+                await asyncio.wait_for(asyncio.to_thread(keep.sync),
+                                       timeout=KEEP["timeout"])
+            except Exception as exc:
+                KEEP["err"] = "checkmark push failed: %s" % exc
+        try:
+            d["state"] = keep.dump()
+            d["last"] = _now_local().isoformat(timespec="seconds")
+            _keep_write(d)
+            KEEP["last"] = d["last"]
+        except Exception as exc:
+            KEEP["err"] = "state save failed: %s" % exc
     KEEP["count"] += made
-    return {"synced": made, "items": touched}
+    KEEP["failed"] = failed
+    return {"synced": made, "items": touched, "failed": failed}
 
 
 async def _keep_loop():
     while True:
         try:
             if _keep_read().get("master_token"):
-                await _keep_once()
+                # Hard ceiling on the whole cycle. Previously a single hung
+                # gkeepapi call left this task awaiting forever, so Keep only
+                # ever synced when the add-on restarted.
+                await asyncio.wait_for(_keep_once(), timeout=KEEP["cycle_timeout"])
+        except asyncio.TimeoutError:
+            KEEP["timeouts"] += 1
+            KEEP["err"] = "Keep cycle timed out after %ds" % KEEP["cycle_timeout"]
+            print("Keep sync: %s" % KEEP["err"])
         except Exception as e:
             KEEP["err"] = str(e)
             print("Keep sync: %s" % e)
@@ -2645,9 +2687,14 @@ async def keep_login(req: KeepLogin):
 @app.get("/keep/status")
 async def keep_status():
     d = _keep_read()
+    # `last_attempt` is the tell: if it keeps advancing while `last_sync` sits
+    # still, the loop is alive and there is simply nothing new. If it stops
+    # advancing, the loop itself has stalled.
     return {"configured": bool(d.get("master_token")), "email": d.get("email", ""),
             "last_sync": d.get("last", ""), "synced_this_run": KEEP["count"],
-            "error": KEEP["err"]}
+            "error": KEEP["err"], "last_attempt": KEEP["attempted"],
+            "cycles": KEEP["cycles"], "timeouts": KEEP["timeouts"],
+            "failed_last_pass": KEEP["failed"], "poll_seconds": KEEP["every"]}
 
 
 @app.post("/keep/sync")
