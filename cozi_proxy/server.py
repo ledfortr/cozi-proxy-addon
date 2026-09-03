@@ -2463,6 +2463,16 @@ async def voice_mirror_status():
             "known_events": len(state.get("mirrored", {}))}
 
 
+@app.get("/ha/state/{entity_id}")
+async def ha_state(entity_id: str):
+    """Read-only look at one Home Assistant entity. Diagnostics only: there is
+    no service-call counterpart here, so this can observe but never actuate."""
+    try:
+        return await _ha_get("/states/" + entity_id)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+
 @app.get("/cozi/calendar/{year}/{month}")
 async def cozi_calendar(year: int, month: int):
     """A month of Cozi appointments — verification, and the dedupe key for any
