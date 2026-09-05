@@ -1499,6 +1499,27 @@ async def chores_approve(req: ChoreId):
     return {"status": "ok", "kid": c.get("done_by")}
 
 
+@app.post("/chores/repost")
+async def chores_repost(req: ChoreId):
+    """Force a chore back onto the board right now, ignoring its frequency
+    clock. Clearing last_done makes _due_date() return None, which _is_due()
+    treats as 'never done -> eligible now'. Use when a chore's cadence changes
+    and you don't want to wait out the old interval."""
+    async with _chores_lock:
+        d = _chores_read()
+        c = next((x for x in d["chores"] if x["id"] == req.id), None)
+        if not c:
+            raise HTTPException(status_code=404, detail="chore not found")
+        c["last_done"] = None
+        c["done_by"] = None
+        c["approved"] = False
+        c["posted"] = True
+        for k in ("done_at", "approved_at", "done_on", "rejected"):
+            c.pop(k, None)
+        _chores_write(d)
+    return {"status": "ok", "name": c.get("name")}
+
+
 @app.post("/chores/clear_rejection")
 async def chores_clear_rejection(req: ChoreId):
     async with _chores_lock:
