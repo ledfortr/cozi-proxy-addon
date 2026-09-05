@@ -499,7 +499,8 @@ def _parse_date(s):
 
 
 def _chores_default():
-    return {"target": 100, "chores": [], "log": {"ian": [], "evan": []}, "week_start": None,
+    return {"target": 100, "chores": [], "log": {"ian": [], "evan": [], "parent": []},
+            "week_start": None,
             "next_id": 1, "sheet_url": "", "last_sync": None, "sync_error": "", "sync_note": "",
             "history": [], "rejections": [], "schema": 0}
 
@@ -514,6 +515,9 @@ def _chores_read():
         base.update(d or {})
         base.setdefault("log", {}).setdefault("ian", [])
         base["log"].setdefault("evan", [])
+        # parents bank points too, but in their own bucket. Nothing that decides
+        # the champion or the optional-unlock credits ever reads this key.
+        base["log"].setdefault("parent", [])
         for c in base.get("chores", []):          # migrate older rows
             c.setdefault("kind", "required")
             c.setdefault("source", "dashboard")
@@ -737,7 +741,7 @@ def _roll_week(d, on=None):
         c["queued_for"] = "na"       # queues start fresh each week
         c.pop("queued_at", None)
         c.pop("queued_by", None)
-    d["log"] = {"ian": [], "evan": []}
+    d["log"] = {"ian": [], "evan": [], "parent": []}
     d["week_start"] = _monday(on).isoformat()
     _repost(d, on)
     return len(done)
@@ -1406,9 +1410,11 @@ async def chores_claim(req: ChoreClaim):
 
 @app.post("/chores/parent_done")
 async def chores_parent_done(req: ChoreId):
-    """A parent finished a job themselves. Unlike a kid's claim this books no
-    LEDPOINTS (parents are not in the champion race) and needs no sign-off, so
-    it lands in the completed list immediately."""
+    """A parent finished a job themselves. Points are banked to the "parent"
+    bucket so the weekly parent total can be shown, but that bucket is never
+    read by the leader/streak/champion logic or the optional-unlock credits, so
+    parents stay out of the Ian-vs-Evan race. No sign-off needed either: it
+    lands in the completed list immediately."""
     async with _chores_lock:
         d = _chores_read()
         c = next((x for x in d["chores"] if x["id"] == req.id), None)
@@ -1422,6 +1428,8 @@ async def chores_parent_done(req: ChoreId):
         c["approved"] = True                  # parents self-approve
         c["approved_at"] = c["done_at"]
         c.pop("rejected", None)
+        d.setdefault("log", {}).setdefault("parent", []).append(
+            {"chore_id": c["id"], "name": c["name"], "points": int(c.get("points", 0))})
         _chores_write(d)
     return {"status": "ok"}
 
