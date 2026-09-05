@@ -781,6 +781,8 @@ def _expire_queues(d):
     now = time.time()
     n = 0
     for c in d["chores"]:
+        # only a kid's self-grabbed job expires; the parent queue is not a
+        # 24h holding pen, it is a to-do list
         if (c.get("queued_for", "na") in ("ian", "evan")
                 and not c.get("done_by")
                 and c.get("queued_by") == "self"):
@@ -1271,8 +1273,9 @@ async def chores_queue(req: ChoreClaim):
     """Kid drops a chore into their own work queue (or 'na' to release it).
     No SMS, no code — completing it later is what needs the kid's code."""
     kid = req.kid.lower()
-    if kid not in ("ian", "evan", "na"):
-        raise HTTPException(status_code=400, detail="kid must be ian, evan or na")
+    if kid not in ("ian", "evan", "parent", "na"):
+        raise HTTPException(status_code=400,
+                            detail="kid must be ian, evan, parent or na")
     async with _chores_lock:
         d = _chores_read()
         c = next((x for x in d["chores"] if x["id"] == req.id), None)
@@ -1398,6 +1401,28 @@ async def chores_claim(req: ChoreClaim):
     asyncio.create_task(_send_sms(
         "mom", "%s just completed chore [%s] at %s"
                % (kid_label, target["name"], _stamp(_now_local()))))
+    return {"status": "ok"}
+
+
+@app.post("/chores/parent_done")
+async def chores_parent_done(req: ChoreId):
+    """A parent finished a job themselves. Unlike a kid's claim this books no
+    LEDPOINTS (parents are not in the champion race) and needs no sign-off, so
+    it lands in the completed list immediately."""
+    async with _chores_lock:
+        d = _chores_read()
+        c = next((x for x in d["chores"] if x["id"] == req.id), None)
+        if not c:
+            raise HTTPException(status_code=404, detail="chore not found")
+        if c.get("done_by"):
+            raise HTTPException(status_code=409, detail="already completed")
+        c["done_by"] = "parent"
+        c["done_on"] = _today().isoformat()
+        c["done_at"] = _now_local().isoformat(timespec="seconds")
+        c["approved"] = True                  # parents self-approve
+        c["approved_at"] = c["done_at"]
+        c.pop("rejected", None)
+        _chores_write(d)
     return {"status": "ok"}
 
 
