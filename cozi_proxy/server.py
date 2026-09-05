@@ -1147,6 +1147,85 @@ def _decorate(c):
     return out
 
 
+# ---------------------------------------------------------------- meal list
+# The family's approved dinners live on the "Meals" tab of the same published
+# workbook as the chores: column A = meal, B = Pre-Time (Fast/Normal),
+# C = Last cooked. Cached briefly so tapping through the planner doesn't hammer
+# Google on every render.
+MEALS_CACHE = {"at": 0.0, "rows": [], "err": "", "ttl": 300}
+
+
+def _meals_url(d=None):
+    d = d if d is not None else _chores_read()
+    u = (d.get("meals_url") or "").strip()
+    if u:
+        return u
+    # fall back to the chores sheet URL with the Meals gid swapped in, which
+    # works when the whole workbook is published rather than a single tab
+    base = (d.get("sheet_url") or "").strip()
+    if base and "gid=" in base:
+        return re.sub(r"gid=\d+", "gid=1210459301", base)
+    return ""
+
+
+async def _meals_fetch(force=False):
+    import time
+    if not force and MEALS_CACHE["rows"] and (time.time() - MEALS_CACHE["at"]) < MEALS_CACHE["ttl"]:
+        return MEALS_CACHE["rows"]
+    url = _meals_url()
+    if not url:
+        MEALS_CACHE["err"] = "no meals sheet configured"
+        return []
+    try:
+        async with aiohttp.ClientSession() as sess:
+            async with sess.get(url, timeout=aiohttp.ClientTimeout(total=20)) as r:
+                if r.status >= 400:
+                    raise RuntimeError("HTTP %d (is the Meals tab published?)" % r.status)
+                text = await r.text()
+    except Exception as e:
+        MEALS_CACHE["err"] = str(e)[:160]
+        return MEALS_CACHE["rows"]          # serve stale rather than nothing
+    rows, seen = [], set()
+    for i, raw in enumerate(csv.reader(io.StringIO(text))):
+        if i == 0 or not raw:
+            continue
+        name = (raw[0] if len(raw) > 0 else "").strip()
+        if not name or name.lower() in seen:
+            continue
+        seen.add(name.lower())
+        pre = (raw[1] if len(raw) > 1 else "").strip()
+        rows.append({"name": name,
+                     "fast": pre.lower().startswith("fast"),
+                     "pre_time": pre,
+                     "last_cooked": (raw[2] if len(raw) > 2 else "").strip()})
+    rows.sort(key=lambda m: m["name"].lower())
+    MEALS_CACHE.update({"at": time.time(), "rows": rows, "err": ""})
+    return rows
+
+
+@app.get("/meals")
+async def meals_get(refresh: bool = False):
+    rows = await _meals_fetch(force=refresh)
+    return {"meals": rows, "count": len(rows),
+            "fast_count": sum(1 for m in rows if m["fast"]),
+            "error": MEALS_CACHE["err"], "url_set": bool(_meals_url())}
+
+
+class MealsUrl(BaseModel):
+    url: str
+
+
+@app.post("/meals/url")
+async def meals_set_url(req: MealsUrl):
+    async with _chores_lock:
+        d = _chores_read()
+        d["meals_url"] = (req.url or "").strip()
+        _chores_write(d)
+    MEALS_CACHE["rows"] = []
+    rows = await _meals_fetch(force=True)
+    return {"status": "ok", "count": len(rows), "error": MEALS_CACHE["err"]}
+
+
 @app.get("/chores")
 async def chores_get():
     d = _chores_read()
