@@ -6,7 +6,7 @@ from pydantic import BaseModel
 from cozi import Cozi
 from cozi.exceptions import InvalidLoginException, CoziException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, Response
 import aiohttp
 
 app = FastAPI(title="Cozi Proxy")
@@ -1224,6 +1224,95 @@ async def meals_set_url(req: MealsUrl):
     MEALS_CACHE["rows"] = []
     rows = await _meals_fetch(force=True)
     return {"status": "ok", "count": len(rows), "error": MEALS_CACHE["err"]}
+
+
+# ---------------------------------------------------------------- meal tracker
+# What actually got cooked, kept in the add-on's own store. The workbook is
+# published read-only so there is no write path to the Tracker tab; this is the
+# source of truth and /meals/tracker.csv produces rows to paste in when wanted.
+class MealTrack(BaseModel):
+    meal: str
+    day: str = ""
+    date: str = ""          # ISO yyyy-mm-dd; defaults to today
+
+
+class MealRate(BaseModel):
+    date: str
+    meal: str = ""
+    rating: str = ""        # 'up' | 'down' | ''
+    notes: str = ""
+
+
+def _meal_log(d):
+    return d.setdefault("meal_log", [])
+
+
+@app.post("/meals/track")
+async def meals_track(req: MealTrack):
+    """Record that a meal was cooked on a date. Upserts on the date so changing
+    your mind about a day replaces the entry instead of stacking duplicates."""
+    meal = (req.meal or "").strip()
+    date = (req.date or "").strip() or _today().isoformat()
+    async with _chores_lock:
+        d = _chores_read()
+        log = _meal_log(d)
+        row = next((r for r in log if r.get("date") == date), None)
+        if not meal:                                   # cleared -> drop the row
+            if row:
+                log.remove(row)
+            _chores_write(d)
+            return {"status": "ok", "removed": bool(row)}
+        if row:
+            row.update({"meal": meal, "day": req.day or row.get("day", "")})
+        else:
+            log.append({"meal": meal, "date": date, "day": req.day or "",
+                        "rating": "", "notes": "",
+                        "at": _now_local().isoformat(timespec="seconds")})
+        d["meal_log"] = sorted(log, key=lambda r: r.get("date", ""))[-400:]
+        _chores_write(d)
+    return {"status": "ok", "meal": meal, "date": date}
+
+
+@app.post("/meals/rate")
+async def meals_rate(req: MealRate):
+    """Thumbs up/down plus a note, so the good ones can be promoted to the
+    approved Meals list later."""
+    async with _chores_lock:
+        d = _chores_read()
+        row = next((r for r in _meal_log(d) if r.get("date") == (req.date or "").strip()), None)
+        if not row:
+            raise HTTPException(status_code=404, detail="no tracked meal on that date")
+        if req.rating is not None:
+            row["rating"] = (req.rating or "").strip().lower()
+        if req.notes is not None:
+            row["notes"] = (req.notes or "").strip()
+        _chores_write(d)
+    return {"status": "ok", "row": row}
+
+
+@app.get("/meals/tracker")
+async def meals_tracker():
+    d = _chores_read()
+    log = sorted(_meal_log(d), key=lambda r: r.get("date", ""), reverse=True)
+    approved = {m["name"].lower() for m in (MEALS_CACHE.get("rows") or [])}
+    for r in log:
+        r["on_approved_list"] = r.get("meal", "").lower() in approved
+    return {"tracker": log, "count": len(log)}
+
+
+@app.get("/meals/tracker.csv")
+async def meals_tracker_csv():
+    """Rows shaped for the workbook's Tracker tab: Meal, Date Cooked, Day,
+    Rating, Notes. Paste straight under the header row."""
+    d = _chores_read()
+    log = sorted(_meal_log(d), key=lambda r: r.get("date", ""), reverse=True)
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["Meal", "Date Cooked", "Day", "Rating", "Notes"])
+    for r in log:
+        w.writerow([r.get("meal", ""), r.get("date", ""), r.get("day", ""),
+                    r.get("rating", ""), r.get("notes", "")])
+    return Response(content=buf.getvalue(), media_type="text/csv")
 
 
 @app.get("/chores")
