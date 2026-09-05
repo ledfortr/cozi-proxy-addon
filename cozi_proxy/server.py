@@ -307,6 +307,12 @@ _chores_lock = asyncio.Lock()
 
 COZI_LISTS = {"chores required": "required", "chores optional": "optional"}
 SYNC_EVERY = 300  # seconds
+# Hard ceiling on one reconcile pass. Without it a hung Google/Cozi call
+# parks the loop task forever and the board silently stops following the
+# spreadsheet until the add-on restarts (this is what happened to the Keep
+# loop: 199-hour gaps against a 60-second poll).
+SYNC_TIMEOUT = 240
+SYNCSTAT = {"attempted": "", "ok": "", "cycles": 0, "timeouts": 0, "err": ""}
 
 FREQ_DAYS = {"daily": 1, "2-day": 2, "weekly": 7, "bi-weekly": 14, "biweekly": 14,
              "monthly": 30,
@@ -1077,8 +1083,17 @@ async def _do_sync():
 async def _sync_loop():
     while True:
         try:
-            await _sync_chores()
+            SYNCSTAT["attempted"] = _now_local().isoformat(timespec="seconds")
+            SYNCSTAT["cycles"] += 1
+            await asyncio.wait_for(_sync_chores(), timeout=SYNC_TIMEOUT)
+            SYNCSTAT["ok"] = _now_local().isoformat(timespec="seconds")
+            SYNCSTAT["err"] = ""
+        except asyncio.TimeoutError:
+            SYNCSTAT["timeouts"] += 1
+            SYNCSTAT["err"] = "sync timed out after %ds" % SYNC_TIMEOUT
+            print("chores sync:", SYNCSTAT["err"])
         except Exception as ex:
+            SYNCSTAT["err"] = str(ex)
             print("chores sync failed:", ex)
         await asyncio.sleep(SYNC_EVERY)
 
@@ -1136,6 +1151,11 @@ async def chores_get():
            "sheet_url": d.get("sheet_url", ""), "last_sync": d.get("last_sync"),
            "sync_error": d.get("sync_error", ""), "sync_note": d.get("sync_note", ""),
            "today": _today().isoformat(),
+           # loop health: if sync_attempted keeps advancing while sync_ok sits
+           # still, the loop is alive and the sheet simply hasn't changed.
+           "sync_attempted": SYNCSTAT["attempted"], "sync_ok": SYNCSTAT["ok"],
+           "sync_cycles": SYNCSTAT["cycles"], "sync_timeouts": SYNCSTAT["timeouts"],
+           "sync_every": SYNC_EVERY,
            "frequencies": ["daily", "2-day", "weekly", "bi-weekly", "monthly"],
            "people": PEOPLE, "people_labels": PEOPLE_LABEL,
            "cozi_enabled": COZI_ENABLED}
