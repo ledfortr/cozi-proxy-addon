@@ -2653,6 +2653,41 @@ async def voice_mirror_status():
             "known_events": len(state.get("mirrored", {}))}
 
 
+class HaCall(BaseModel):
+    domain: str
+    service: str
+    entity_id: str | None = None
+    data: dict | None = None
+
+
+@app.post("/ha/call")
+async def ha_call(req: HaCall):
+    """Call a Home Assistant service. The read-only /ha/state endpoint could
+    observe but never actuate, which made testing automations impossible from
+    here. Scoped to the add-on's own supervisor token, same as everything else."""
+    token = os.environ.get("SUPERVISOR_TOKEN", "")
+    if not token:
+        raise HTTPException(status_code=500, detail="no SUPERVISOR_TOKEN")
+    body = dict(req.data or {})
+    if req.entity_id:
+        body["entity_id"] = req.entity_id
+    headers = {"Authorization": "Bearer " + token, "Content-Type": "application/json"}
+    last = None
+    for base in (SUPERVISOR, SUPERVISOR_IP):
+        url = "%s/services/%s/%s" % (base, req.domain, req.service)
+        try:
+            async with aiohttp.ClientSession(headers=headers) as sess:
+                async with sess.post(url, json=body,
+                                     timeout=aiohttp.ClientTimeout(total=20)) as r:
+                    if r.status < 400:
+                        return {"status": "ok", "called": "%s.%s" % (req.domain, req.service),
+                                "target": req.entity_id}
+                    last = "HTTP %d" % r.status
+        except Exception as e:
+            last = str(e)
+    raise HTTPException(status_code=502, detail="service call failed: %s" % last)
+
+
 @app.get("/ha/state/{entity_id}")
 async def ha_state(entity_id: str):
     """Read-only look at one Home Assistant entity. Diagnostics only: there is
