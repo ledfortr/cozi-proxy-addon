@@ -1528,6 +1528,43 @@ async def chores_repost(req: ChoreId):
     return {"status": "ok", "name": c.get("name")}
 
 
+class ChoreReassign(BaseModel):
+    id: int
+    to: str = "na"          # 'ian' | 'evan' | 'parent' | 'na' (back on the board)
+
+
+@app.post("/chores/reassign")
+async def chores_reassign(req: ChoreReassign):
+    """Hand a sent-back chore to somebody else, or drop it back on the open
+    board. The rejection note is cleared, so it stops rendering as that kid's
+    FIX card and becomes an ordinary job again. Points were already clawed back
+    at reject time, so there is nothing to adjust here."""
+    to = (req.to or "na").lower()
+    if to not in ("ian", "evan", "parent", "na"):
+        raise HTTPException(status_code=400, detail="to must be ian, evan, parent or na")
+    async with _chores_lock:
+        d = _chores_read()
+        c = next((x for x in d["chores"] if x["id"] == req.id), None)
+        if not c:
+            raise HTTPException(status_code=404, detail="chore not found")
+        c.pop("rejected", None)
+        c["done_by"] = None
+        c["approved"] = False
+        for k in ("done_at", "approved_at", "done_on"):
+            c.pop(k, None)
+        c["queued_for"] = to
+        c["posted"] = True
+        if to == "na":
+            c.pop("queued_by", None)
+            c.pop("queued_at", None)
+        else:
+            # parent-assigned work stays in the queue until it is actually done
+            c["queued_by"] = "parent"
+            c.pop("queued_at", None)
+        _chores_write(d)
+    return {"status": "ok", "name": c.get("name"), "to": to}
+
+
 @app.post("/chores/clear_rejection")
 async def chores_clear_rejection(req: ChoreId):
     async with _chores_lock:
@@ -1591,7 +1628,7 @@ def _reset_all(d, on=None):
         c["queued_for"] = "na"
         c["last_done"] = None
         c["posted"] = True          # everything on the board and claimable
-    d["log"] = {"ian": [], "evan": []}
+    d["log"] = {"ian": [], "evan": [], "parent": []}
     d["history"] = []
     d["rejections"] = []
     d["mines"] = {}
