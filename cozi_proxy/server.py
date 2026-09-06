@@ -3066,7 +3066,7 @@ async def keep_share(req: KeepShare):
     if "@" not in email:
         raise HTTPException(status_code=400, detail="a real email address is required")
 
-    def _share(cozi_titles):
+    def _share(cozi_lists):
         res = _keep_sync_sync()
         if not res.get("ok"):
             return res
@@ -3080,7 +3080,10 @@ async def keep_share(req: KeepShare):
             if wanted is not None:
                 if title.lower() not in wanted:
                     continue
-            elif title.lower() not in cozi_titles:
+            elif not _pick_list(title, cozi_lists):
+                # Same matcher the sync uses, so the default set is exactly the
+                # lists that actually flow into Cozi. Exact title equality missed
+                # "Home Depot / Lowe's" -> "Home Depot/Lowe's".
                 skipped.append({"list": title, "why": "no matching Cozi list"})
                 continue
             existing = [str(c).lower() for c in note.collaborators.all()]
@@ -3097,8 +3100,7 @@ async def keep_share(req: KeepShare):
         return {"ok": True, "shared": done, "skipped": skipped, "state": keep.dump()}
 
     cozi_lists = await cozi_client.get_lists() if (cozi_client and logged_in) else []
-    cozi_titles = {(l.get("title") or "").strip().lower() for l in cozi_lists}
-    out = await asyncio.to_thread(_share, cozi_titles)
+    out = await asyncio.to_thread(_share, cozi_lists)
     if not out.get("ok"):
         raise HTTPException(status_code=400, detail=out.get("reason"))
     if out.get("state"):
