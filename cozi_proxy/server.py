@@ -3044,6 +3044,71 @@ async def keep_newlist(req: KeepNewList):
     return {"status": "ok", "title": req.title, "already_there": out.get("existed")}
 
 
+class KeepShare(BaseModel):
+    email: str
+    titles: list[str] | None = None
+
+
+@app.post("/keep/share")
+async def keep_share(req: KeepShare):
+    """Add a collaborator to the shared Keep lists.
+
+    Google Assistant resolves "add X to my Costco list" against the *speaking*
+    user's own Keep, so a second person in the house gets told the list does not
+    exist. Sharing fixes that without moving anything: a shared note stays owned
+    by the account this add-on authenticates as, so the Cozi sync keeps seeing
+    every item either person adds.
+
+    Pass `titles` to share specific lists, or omit it to share every list that
+    currently maps onto a Cozi list.
+    """
+    email = (req.email or "").strip()
+    if "@" not in email:
+        raise HTTPException(status_code=400, detail="a real email address is required")
+
+    def _share(cozi_titles):
+        res = _keep_sync_sync()
+        if not res.get("ok"):
+            return res
+        keep = res["keep"]
+        wanted = None
+        if req.titles:
+            wanted = {t.strip().lower() for t in req.titles}
+        done, skipped = [], []
+        for note in res["lists"]:
+            title = (note.title or "").strip()
+            if wanted is not None:
+                if title.lower() not in wanted:
+                    continue
+            elif title.lower() not in cozi_titles:
+                skipped.append({"list": title, "why": "no matching Cozi list"})
+                continue
+            existing = [str(c).lower() for c in note.collaborators.all()]
+            if email.lower() in existing:
+                skipped.append({"list": title, "why": "already shared"})
+                continue
+            try:
+                note.collaborators.add(email)
+                done.append(title)
+            except Exception as e:
+                skipped.append({"list": title, "why": str(e)})
+        if done:
+            keep.sync()
+        return {"ok": True, "shared": done, "skipped": skipped, "state": keep.dump()}
+
+    cozi_lists = await cozi_client.get_lists() if (cozi_client and logged_in) else []
+    cozi_titles = {(l.get("title") or "").strip().lower() for l in cozi_lists}
+    out = await asyncio.to_thread(_share, cozi_titles)
+    if not out.get("ok"):
+        raise HTTPException(status_code=400, detail=out.get("reason"))
+    if out.get("state"):
+        d = _keep_read()
+        d["state"] = out["state"]
+        _keep_write(d)
+    return {"status": "ok", "collaborator": email,
+            "shared": out["shared"], "skipped": out["skipped"]}
+
+
 @app.get("/keep/lists")
 async def keep_lists():
     """What Keep has, and which Cozi list each one would land on."""
