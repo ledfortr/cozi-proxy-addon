@@ -1367,8 +1367,8 @@ async def chores_adhoc(req: ChoreAdHoc):
     It's a normal chore (claimable for points) but frequency 'once' so the
     weekly roll drops it instead of reposting."""
     kid = req.kid.lower()
-    if kid not in ("ian", "evan"):
-        raise HTTPException(status_code=400, detail="kid must be ian or evan")
+    if kid not in ("ian", "evan", "parent"):
+        raise HTTPException(status_code=400, detail="kid must be ian, evan or parent")
     async with _chores_lock:
         d = _chores_read()
         cid = d.get("next_id", 1)
@@ -1381,9 +1381,14 @@ async def chores_adhoc(req: ChoreAdHoc):
         d["next_id"] = cid + 1
         _chores_write(d)
     what = c["description"] or c["name"]
-    body = ("Times are tough, cupcake. We need you to do something a little "
-            "different today — we need you to %s (%s pts)." % (what, c["points"]))
-    sent = await _send_sms(kid, body)
+    if kid == "parent":
+        # A parent queueing work for themselves doesn't need the cupcake speech.
+        body = "Added to the parent queue: %s (%s pts)." % (what, c["points"])
+        sent = await _send_sms("mom", body)
+    else:
+        body = ("Times are tough, cupcake. We need you to do something a little "
+                "different today — we need you to %s (%s pts)." % (what, c["points"]))
+        sent = await _send_sms(kid, body)
     return {"status": "ok", "id": cid, "sms": sent}
 
 
@@ -1514,10 +1519,11 @@ async def sms_send(req: SmsSend):
 
 @app.post("/chores/assign")
 async def chores_assign(req: ChoreClaim):
-    """Parent assigns a chore to a kid and texts them to go do it."""
+    """Parent assigns a chore and texts whoever it landed on. 'parent' is a
+    valid destination: some jobs are not a kid's to do."""
     kid = req.kid.lower()
-    if kid not in ("ian", "evan"):
-        raise HTTPException(status_code=400, detail="kid must be ian or evan")
+    if kid not in ("ian", "evan", "parent"):
+        raise HTTPException(status_code=400, detail="kid must be ian, evan or parent")
     async with _chores_lock:
         d = _chores_read()
         c = next((x for x in d["chores"] if x["id"] == req.id), None)
@@ -1528,11 +1534,12 @@ async def chores_assign(req: ChoreClaim):
         c["queued_by"] = "parent"    # parent-assigned -> stays put until done
         c.pop("queued_at", None)
         _chores_write(d)
-    body = "You need to do this chore now: " + c["name"]
+    body = ("Added to the parent queue: " if kid == "parent"
+            else "You need to do this chore now: ") + c["name"]
     if c.get("description"):
         body += " — " + c["description"]
     body += " (%s pts)" % c.get("points", 0)
-    sent = await _send_sms(kid, body)
+    sent = await _send_sms("mom" if kid == "parent" else kid, body)
     return {"status": "ok", "sms": sent}
 
 
