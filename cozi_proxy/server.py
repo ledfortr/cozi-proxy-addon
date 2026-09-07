@@ -899,6 +899,7 @@ async def _from_sheet(url):
                             "description": val(row, "description"),
                             "kind": kind, "source": "sheet",
                             "frequency": _freq(val(row, "frequency")),
+                            "room": val(row, "room").strip(),
                             "assigned_to": _person(val(row, "assigned"))}
     return out, ""
 
@@ -927,6 +928,7 @@ def _map_columns(fieldnames):
     claim("assigned", "assign", "who", "owner", "person", "whose")
     claim("frequency", "frequen", "how often", "repeat", "cadence", "schedule")
     claim("description", "detail", "step", "descri", "how", "note", "instruction")
+    claim("room", "room", "area", "location", "where", "zone")
     claim("points", "point", "pts", "value", "worth")
     claim("kind", "type", "kind", "required", "optional", "categ")
     claim("name", "chore", "task", "job", "title", "name")
@@ -972,6 +974,10 @@ async def _do_sync():
                           "description": _merge_desc(c.get("description"), e["description"]),
                           "kind": e["kind"],
                           "assigned_to": e.get("assigned_to", c.get("assigned_to", "na"))})
+                # Cozi rows carry no room, so an empty one must not wipe the
+                # sheet's value on a later Cozi-only pass.
+                if e.get("room"):
+                    c["room"] = e["room"]
                 if e.get("frequency"):
                     c["frequency"] = e["frequency"]
                 if key in sheet_items:
@@ -983,6 +989,7 @@ async def _do_sync():
                 d["next_id"] = cid + 1
                 nc = {"id": cid, "name": e["name"], "points": e["points"],
                       "description": e["description"], "kind": e["kind"],
+                      "room": e.get("room", ""),
                       "frequency": e.get("frequency") or DEFAULT_FREQ,
                       "last_done": None, "posted": True,
                       "from_sheet": key in sheet_items,
