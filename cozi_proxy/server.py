@@ -1072,6 +1072,9 @@ class ChoreAdd(BaseModel):
     kind: str = "required"
     frequency: str = DEFAULT_FREQ
     assigned_to: str = "na"
+    # Without a room a dashboard-added chore falls into the board's "no room"
+    # bucket instead of sitting with its neighbours.
+    room: str = ""
 
 class ChoreEdit(BaseModel):
     id: int
@@ -1081,6 +1084,7 @@ class ChoreEdit(BaseModel):
     kind: str | None = None
     frequency: str | None = None
     assigned_to: str | None = None
+    room: str | None = None
 
 class ChoreId(BaseModel):
     id: int
@@ -1311,6 +1315,7 @@ async def chores_add(req: ChoreAdd):
                             "kind": "optional" if req.kind == "optional" else "required",
                             "frequency": _freq(req.frequency) or DEFAULT_FREQ,
                             "assigned_to": _person(req.assigned_to),
+                            "room": (req.room or "").strip(),
                             "last_done": None, "posted": True,
                             "done_by": None, "source": "dashboard"})
         d["next_id"] = cid + 1
@@ -1371,6 +1376,8 @@ async def chores_edit(req: ChoreEdit):
                     c["frequency"] = _freq(req.frequency) or DEFAULT_FREQ
                 if req.assigned_to is not None:
                     c["assigned_to"] = _person(req.assigned_to)
+                if req.room is not None:
+                    c["room"] = req.room.strip()
         _chores_write(d)
     return {"status": "ok"}
 
