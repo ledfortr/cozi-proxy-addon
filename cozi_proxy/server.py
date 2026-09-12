@@ -87,6 +87,7 @@ async def startup_event():
     logging.getLogger("cozi").setLevel(logging.WARNING)
     logging.getLogger().setLevel(logging.INFO)
     _load_sms_options()
+    _load_push_options()
     _load_mirror_options()
     await auto_login()
     asyncio.create_task(_sync_loop())      # keeps chores reconciled with Cozi + sheet
@@ -413,6 +414,94 @@ def _send_sms_raw_sync(number, body, gateway=None):
 
 async def _send_sms_raw(number, body, gateway=None):
     return await asyncio.to_thread(_send_sms_raw_sync, number, body, gateway)
+
+
+# --- Home Assistant Companion push -----------------------------------------
+# Carrier email-to-SMS is going away: AT&T shut down June 2025, T-Mobile
+# December 2024, and Verizon's vtext.com completes its shutdown 2027-03-31 and
+# already drops messages silently (the SMTP handoff succeeds, no text arrives,
+# no bounce). So every text now also goes out as a Companion-app push.
+#
+# Push reaches phones away from home: HA makes an OUTGOING connection to
+# FCM/APNS and Google/Apple deliver. No port forwarding, no VPN, no Nabu Casa.
+#
+# The add-on sets homeassistant_api: true, so SUPERVISOR_TOKEN can call core
+# directly - there is no long-lived token to mint or rotate.
+PUSH = {"services": {}, "parents_both": True}
+
+_PUSH_DEFAULTS = {
+    "mom": "mobile_app_ashley_phone",
+    "dad": "mobile_app_tom_s_phone_s25_ultra",
+    "ian": "",
+    "evan": "",
+}
+
+
+def _load_push_options():
+    try:
+        with open("/data/options.json") as f:
+            o = json.load(f)
+    except Exception:
+        o = {}
+    svcs = {}
+    for who, default in _PUSH_DEFAULTS.items():
+        v = o.get("push_" + who)
+        svcs[who] = (default if v is None else str(v)).strip()
+    PUSH["services"] = svcs
+    PUSH["parents_both"] = bool(o.get("push_parents_both", True))
+    on = [w for w, s in svcs.items() if s]
+    if os.environ.get("SUPERVISOR_TOKEN"):
+        print("PUSH: companion-app notifications enabled for %s" % (on or "nobody"))
+    else:
+        print("PUSH: disabled (no SUPERVISOR_TOKEN - is homeassistant_api set?)")
+
+
+async def _send_push(who, body, title="El Dashboardio", tag=None):
+    """One Companion-app notification. Never raises; returns True on delivery
+    to HA (not to the handset - FCM is fire and forget)."""
+    svc = PUSH["services"].get(who)
+    token = os.environ.get("SUPERVISOR_TOKEN")
+    if not svc or not token:
+        return False
+    payload = {"title": title, "message": body}
+    if tag:
+        # A repeat of the same alert replaces the old one instead of stacking.
+        payload["data"] = {"tag": tag}
+    url = "http://supervisor/core/api/services/notify/%s" % svc
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.post(url, json=payload,
+                              headers={"Authorization": "Bearer %s" % token},
+                              timeout=aiohttp.ClientTimeout(total=15)) as r:
+                if r.status < 300:
+                    print("PUSH sent to %s: %s" % (who, body[:70]))
+                    return True
+                print("PUSH to %s FAILED: HTTP %s" % (who, r.status))
+    except Exception as e:
+        print("PUSH to %s FAILED: %s" % (who, e))
+    return False
+
+
+async def _notify(who, body, title="El Dashboardio", tag=None):
+    """Text AND push, concurrently. One path failing never blocks the other -
+    that redundancy is the whole point while vtext is dying."""
+    sms, push = await asyncio.gather(
+        _send_sms(who, body),
+        _send_push(who, body, title, tag),
+        return_exceptions=True,
+    )
+    return bool(sms is True or push is True)
+
+
+async def _notify_parents(body, title="El Dashboardio", tag=None):
+    """Parent-facing alerts. The text keeps its existing single recipient (mom);
+    push goes to both parents so either can act on it."""
+    tasks = [_notify("mom", body, title, tag)]
+    if PUSH["parents_both"]:
+        tasks.append(_send_push("dad", body, title, tag))
+    res = await asyncio.gather(*tasks, return_exceptions=True)
+    return bool(any(r is True for r in res))
+
 
 
 def _now_local():
@@ -1353,11 +1442,12 @@ async def chores_adhoc(req: ChoreAdHoc):
     if kid == "parent":
         # A parent queueing work for themselves doesn't need the cupcake speech.
         body = "Added to the parent queue: %s (%s pts)." % (what, c["points"])
-        sent = await _send_sms("mom", body)
+        sent = await _notify_parents(body, title="Parent queue",
+                                     tag="chore_parent_queue")
     else:
         body = ("Times are tough, cupcake. We need you to do something a little "
                 "different today — we need you to %s (%s pts)." % (what, c["points"]))
-        sent = await _send_sms(kid, body)
+        sent = await _notify(kid, body, title="New chore", tag="chore_new")
     return {"status": "ok", "id": cid, "sms": sent}
 
 
@@ -1507,7 +1597,12 @@ async def chores_assign(req: ChoreClaim):
     if c.get("description"):
         body += " — " + c["description"]
     body += " (%s pts)" % c.get("points", 0)
-    sent = await _send_sms("mom" if kid == "parent" else kid, body)
+    if kid == "parent":
+        sent = await _notify_parents(body, title="Parent queue",
+                                     tag="chore_parent_queue")
+    else:
+        sent = await _notify(kid, body, title="Chore assigned",
+                             tag="chore_assigned")
     return {"status": "ok", "sms": sent}
 
 
@@ -1557,9 +1652,10 @@ async def chores_done(req: ChoreId):
         cl.pop("rejected", None)
         _chores_write(d)
     kid_label = PEOPLE_LABEL.get(cl["kid"], cl["kid"].title())
-    asyncio.create_task(_send_sms(
-        "mom", "%s just completed chore [%s] at %s"
-               % (kid_label, cl["name"], _stamp(_now_local()))))
+    asyncio.create_task(_notify_parents(
+        "%s just completed chore [%s] at %s"
+        % (kid_label, cl["name"], _stamp(_now_local())),
+        title="Chore completed", tag="chore_done"))
     return {"status": "ok"}
 
 
@@ -1629,7 +1725,8 @@ async def chores_reject(req: ChoreReject):
         _chores_write(d)
     body = "Your chore [%s] was sent back: %s" % (cl["name"],
                                                   (req.comment or "").strip() or "please redo it")
-    sent = await _send_sms(cl["kid"], body)
+    sent = await _notify(cl["kid"], body, title="Chore sent back",
+                         tag="chore_rejected")
     return {"status": "ok", "sms": sent}
 
 
