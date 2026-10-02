@@ -1,5 +1,17 @@
 # Changelog
 
+## 2.2.1
+- A kid can now take any job again straight away, as many times a day as they
+  like, and more than one kid can have the same job open at once. The claim
+  endpoint used to return 409 "You already have that one in your queue" while an
+  earlier claim was still open - and because an open claim includes one already
+  marked done but not yet approved, a chore finished days ago and never signed
+  off stayed permanently unclaimable. The board already advertised "take it as
+  many times as you earn it"; now that is actually true.
+- Nothing else changes: points still only land when a parent approves, and
+  duplicate claims appear as separate rows so a parent can reject the extras.
+
+
 ## 2.2.0
 - Chore alerts now go out as Home Assistant Companion push in addition to the
   text. Carrier email-to-SMS is being retired (AT&T shut down June 2025,

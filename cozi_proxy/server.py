@@ -1609,7 +1609,9 @@ async def chores_assign(req: ChoreClaim):
 @app.post("/chores/claim")
 async def chores_claim(req: ChoreClaim):
     """A kid takes a job. This creates a claim; the chore itself is untouched and
-    stays on the board, so the other kid can take the same job the same day."""
+    stays on the board, so anyone can take the same job again the same day -
+    including the same kid, and including while an earlier claim is still
+    waiting on a parent."""
     kid = req.kid.lower()
     if kid not in ("ian", "evan", "parent"):
         raise HTTPException(status_code=400, detail="kid must be ian, evan or parent")
@@ -1618,12 +1620,15 @@ async def chores_claim(req: ChoreClaim):
         target = next((c for c in d["chores"] if c["id"] == req.id), None)
         if not target:
             raise HTTPException(status_code=404, detail="chore not found")
-        # One open claim each. Repeats are unlimited, but finish the one you have
-        # before taking the same job again, or the queue fills with duplicates.
-        if any(c["state"] in CLAIM_OPEN
-               for c in _claims_for(d, kid=kid, chore_id=req.id)):
-            raise HTTPException(status_code=409,
-                                detail="You already have that one in your queue")
+        # No gate: any job, any number of times a day, by anyone.
+        # There used to be a one-open-claim-per-kid-per-chore check returning
+        # 409. It did not block repeats so much as UNAPPROVED ones, because
+        # CLAIM_OPEN counts "done" as still open - so a chore finished days ago
+        # and never signed off stayed unclaimable, which reads as a broken board
+        # rather than a pending approval. The board already told kids "take it as
+        # many times as you earn it"; this makes that true.
+        # Tradeoff: a double-tap makes two claims. They show separately, so a
+        # parent can reject the extra.
         cid = d.get("next_claim", 1)
         d["next_claim"] = cid + 1
         d.setdefault("claims", []).append({
