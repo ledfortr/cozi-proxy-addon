@@ -1,5 +1,20 @@
 # Changelog
 
+## 2.3.0
+- A closed week now remembers WHEN each job happened. History entries keep the
+  claim's `on`, `queued_at`, `done_at` and `approved_at`, plus `chore_id` and
+  `claim_id`. Before this a closed week only held name, person and points, so
+  the job board's Prior Week Report could not lay the week out Monday to Sunday.
+- The week close no longer loses unapproved work without a trace. Claims still
+  waiting on a parent (`done`) or never finished (`queued`) at midnight Sunday
+  are recorded in a new `unapproved` list on the history entry. They still do
+  not score - this only makes them visible to the weekly audit.
+- A week with no approved jobs but some unapproved ones is now banked too.
+- New `POST /chores/history/annotate` restores day/time to a week that closed
+  before this release, from a backup taken while that week was live. It can only
+  add times: the jobs sent must match the week's banked jobs exactly (name,
+  person, points), and a week that already has times is refused.
+
 ## 2.2.1
 - A kid can now take any job again straight away, as many times a day as they
   like, and more than one kid can have the same job open at once. The claim
