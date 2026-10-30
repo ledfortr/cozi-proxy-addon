@@ -1,5 +1,21 @@
 # Changelog
 
+## 2.4.0
+- `POST /chores/adhoc` now closes a one-off job out and approves it on the spot.
+  A one-off is nearly always work that already happened, so the old path cost
+  three steps to record it: create a claimable chore, queue it for the kid, wait
+  for a Done tap, then wait again for a parent sign-off. It now writes a single
+  approved claim and banks the points immediately. Send `approve: false` for the
+  old queue-and-sign-off behaviour.
+- An instantly-approved one-off leaves no chore on the board. A `once` chore
+  survived until Monday even after it was finished, so a job that was already
+  done and paid for sat there claimable again for the same points.
+- New `POST /chores/void` takes back an approved claim and unbanks its points,
+  removing both the claim and its weekly log row. This was the only state with
+  no way out: `/chores/unclaim` accepts open claims only and `/chores/reject`
+  accepts finished ones only, so neither touched an approved claim and both
+  buttons on a completed job board card did nothing at all.
+
 ## 2.3.0
 - A closed week now remembers WHEN each job happened. History entries keep the
   claim's `on`, `queued_at`, `done_at` and `approved_at`, plus `chore_id` and

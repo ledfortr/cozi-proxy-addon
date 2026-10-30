@@ -1438,17 +1438,73 @@ class ChoreAdHoc(BaseModel):
     name: str
     description: str = ""
     points: int = 0
-    kid: str                     # ian or evan
+    kid: str                     # ian, evan or parent
+    # A one-off is nearly always work that already happened, so closing it
+    # out is the default. approve=false keeps the old queue-and-sign-off path.
+    approve: bool = True
+
+
+async def _adhoc_approved(kid, req):
+    """One-off, already done, already signed off.
+
+    No chore is appended. Every claim lookup in the board and the reports runs
+    chore -> claims and never the other way, and a claim carries its own name and
+    points, so a chore_id with nothing behind it renders, banks and rolls up
+    correctly. next_id is still consumed so the id can never collide with a real
+    chore later."""
+    name = req.name.strip()
+    desc = (req.description or "").strip()
+    points = int(req.points)
+    async with _chores_lock:
+        d = _chores_read()
+        cid = d.get("next_id", 1)
+        d["next_id"] = cid + 1
+        clid = d.get("next_claim", 1)
+        d["next_claim"] = clid + 1
+        now = _now_local().isoformat(timespec="seconds")
+        d.setdefault("claims", []).append({
+            "id": clid, "chore_id": cid, "name": name, "points": points,
+            "kid": kid, "state": "approved", "description": desc,
+            "queued_at": now, "done_at": now, "approved_at": now,
+            "on": _today().isoformat(), "source": "adhoc",
+        })
+        d["log"].setdefault(kid, []).append({
+            "chore_id": cid, "claim_id": clid, "name": name, "points": points,
+            "on": _today().isoformat(), "at": now,
+        })
+        _chores_write(d)
+    what = desc or name
+    if kid == "parent":
+        body = "Logged and approved: %s (%s pts)." % (what, points)
+        sent = await _notify_parents(body, title="Job approved",
+                                     tag="chore_adhoc_approved")
+    else:
+        # Not the cupcake speech - there is nothing left for them to go and do.
+        body = ("Logged for you: %s. That is %s pts, already approved and banked."
+                % (what, points))
+        sent = await _notify(kid, body, title="Job approved",
+                             tag="chore_adhoc_approved")
+    return {"status": "ok", "id": cid, "claim": clid, "approved": True,
+            "points": points, "kid": kid, "sms": sent}
 
 
 @app.post("/chores/adhoc")
 async def chores_adhoc(req: ChoreAdHoc):
-    """Parent adds a one-off chore straight into a kid's queue and texts them.
-    It's a normal chore (claimable for points) but frequency 'once' so the
-    weekly roll drops it instead of reposting."""
+    """Parent adds a one-off job.
+
+    approve=True (the default): no chore row and no queue. One approved claim is
+    written and the points are banked on the spot - new job straight to approved,
+    no Done tap and no sign-off. Nothing is left on the board, so a job that is
+    already finished cannot be claimed again for the same points until Monday.
+
+    approve=False: the old path - a normal claimable chore at frequency 'once'
+    that lands in the kid's queue, so the weekly roll drops it instead of
+    reposting."""
     kid = req.kid.lower()
     if kid not in ("ian", "evan", "parent"):
         raise HTTPException(status_code=400, detail="kid must be ian, evan or parent")
+    if req.approve:
+        return await _adhoc_approved(kid, req)
     async with _chores_lock:
         d = _chores_read()
         cid = d.get("next_id", 1)
@@ -1470,7 +1526,7 @@ async def chores_adhoc(req: ChoreAdHoc):
         body = ("Times are tough, cupcake. We need you to do something a little "
                 "different today — we need you to %s (%s pts)." % (what, c["points"]))
         sent = await _notify(kid, body, title="New chore", tag="chore_new")
-    return {"status": "ok", "id": cid, "sms": sent}
+    return {"status": "ok", "id": cid, "approved": False, "sms": sent}
 
 
 @app.post("/chores/edit")
@@ -1781,6 +1837,31 @@ async def chores_approve(req: ChoreId):
         })
         _chores_write(d)
     return {"status": "ok", "points": int(cl.get("points", 0)), "kid": cl["kid"]}
+
+
+@app.post("/chores/void")
+async def chores_void(req: ChoreId):
+    """Take back an approved claim and unbank its points.
+
+    The only way back from an instantly-approved one-off: unclaim drops open
+    claims only and reject accepts finished ones only, so neither touches an
+    approved claim. Points live in two places once signed off - the claim and
+    the weekly log - and both have to go or the board and the bank disagree."""
+    async with _chores_lock:
+        d = _chores_read()
+        cl = next((c for c in d.get("claims", []) if c["id"] == req.id), None)
+        if not cl:
+            raise HTTPException(status_code=404, detail="claim not found")
+        if cl.get("state") != "approved":
+            raise HTTPException(status_code=409, detail="that claim is not approved")
+        kid = cl["kid"]
+        name = cl["name"]
+        points = int(cl.get("points", 0))
+        d["claims"] = [c for c in d["claims"] if c["id"] != req.id]
+        d["log"][kid] = [e for e in d["log"].get(kid, [])
+                         if e.get("claim_id") != req.id]
+        _chores_write(d)
+    return {"status": "ok", "name": name, "kid": kid, "points": points}
 
 
 @app.post("/chores/repost")
